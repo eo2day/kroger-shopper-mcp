@@ -18,7 +18,7 @@ The service is designed to sit between a Kroger shopper account and local automa
 ## Features
 
 - OAuth authorization code flow for Kroger shopper accounts
-- app-managed login gate for the authorize page with first-run credential setup
+- app-managed login gate for the authorize page with first-run credential setup (`/setup` creates the initial username/password, subsequent access uses `/login`)
 - local SQLite storage for token metadata, pending OAuth state, settings, and tracked cart items
 - store search and default-store selection
 - product search scoped to a Kroger location
@@ -26,10 +26,13 @@ The service is designed to sit between a Kroger shopper account and local automa
   - dry-run preview mode
   - out-of-stock blocking
   - optional override for `unknown_stock` cases
-- local tracked-cart inspection with live stock revalidation
-- staged cart composition before live Kroger commits
-- purchased-item history with quantities and timestamps
+- **staged cart composition** — build a local cart before committing to Kroger:
+  1. Add items to staged cart (local-only)
+  2. Review or save as a named saved cart
+  3. Commit to live Kroger when ready
+  4. Optionally clear staged cart after commit
 - named saved carts backed by SQLite for quick reuse
+- purchased-item history with quantities and timestamps
 
 ## Configuration
 
@@ -47,8 +50,8 @@ Required variables:
 
 Optional variables:
 
-- `KROGER_SERVICE_URL`
-- `KROGER_PUBLIC_BASE_URL`
+- `KROGER_SERVICE_URL` — address the service binds to (default: `http://127.0.0.1:5092`)
+- `KROGER_PUBLIC_BASE_URL` — public-facing base URL used for web auth redirects (e.g. `https://kroger.ash-ai.rapphosted.digital`)
 - `KROGER_ENV_FILE`
 - `KROGER_ALLOW_INSECURE_ENV_FILE`
 
@@ -171,7 +174,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/path/to/kroger-shopper-mcp
 Environment=KROGER_ENV_FILE=/path/to/runtime/kroger.env
-ExecStart=/usr/bin/dotnet /path/to/kroger-shopper-mcp/bin/Debug/net10.0/KrogerCs.dll serve
+ExecStart=/usr/bin/dotnet /path/to/kroger-shopper-mcp/dist/KrogerCs.dll serve
 Restart=always
 RestartSec=2
 
@@ -184,7 +187,7 @@ Typical setup flow:
 ```bash
 cp .env.example /path/to/runtime/kroger.env
 chmod 600 /path/to/runtime/kroger.env
-dotnet build
+dotnet publish -c Release -o dist
 mkdir -p ~/.config/systemd/user
 $EDITOR ~/.config/systemd/user/kroger-shopper-mcp.service
 systemctl --user daemon-reload
@@ -192,7 +195,7 @@ systemctl --user enable --now kroger-shopper-mcp.service
 systemctl --user status kroger-shopper-mcp.service
 ```
 
-For internet-facing deployments, place a reverse proxy in front of the local service and keep authentication, TLS termination, and any public callback routes in that outer layer.
+For internet-facing deployments, place a reverse proxy in front of the local service for TLS termination and public callback routing. The app provides its own login gate so the web authorize flow is protected; on first visit, go to `/setup` to create the initial username and password.
 
 ## Status
 
