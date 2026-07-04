@@ -14,6 +14,7 @@ internal static class ServiceHost
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls(config.ServiceUrl);
+        builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton(config);
         builder.Services.AddSingleton(new KrogerStore(config.DbPath));
         builder.Services.AddHttpClient();
@@ -21,6 +22,7 @@ internal static class ServiceHost
         builder.Services.AddSingleton<KrogerProductsClient>();
         builder.Services.AddSingleton<KrogerLocationsClient>();
         builder.Services.AddSingleton<KrogerCartService>();
+        builder.Services.AddSingleton<KrogerWebAuthService>();
 
         var app = builder.Build();
         var store = app.Services.GetRequiredService<KrogerStore>();

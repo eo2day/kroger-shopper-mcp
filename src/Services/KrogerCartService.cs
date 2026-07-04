@@ -3,11 +3,18 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using KrogerShopperMcp.Infrastructure;
+using KrogerShopperMcp.Models;
 
 namespace KrogerShopperMcp.Services;
 
 internal sealed class KrogerCartService
 {
+    private sealed record SavedCartItemPayload(string? Upc, int Quantity);
+    private static readonly JsonSerializerOptions SavedCartJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     private readonly KrogerProductsClient _productsClient;
     private readonly KrogerOAuthClient _oauthClient;
 
@@ -57,6 +64,72 @@ internal sealed class KrogerCartService
             location_id = resolvedLocationId,
             count = items.Count,
             items
+        };
+    }
+
+    public async Task<object> GetStagedCartInfoAsync(KrogerStore store, string? locationId)
+    {
+        var stagedItems = await store.GetStagedCartItemsAsync();
+        var resolvedLocationId = string.IsNullOrWhiteSpace(locationId)
+            ? await store.GetDefaultStoreIdAsync()
+            : locationId;
+
+        var items = new List<object>();
+        foreach (var stagedItem in stagedItems)
+        {
+            var snapshot = await _productsClient.GetProductByUpcAsync(store, stagedItem.Upc, resolvedLocationId);
+            items.Add(new
+            {
+                upc = stagedItem.Upc,
+                staged_quantity = stagedItem.Quantity,
+                updated_at_utc = stagedItem.UpdatedAtUtc.ToString("O"),
+                product_id = snapshot?.ProductId,
+                description = snapshot?.Description,
+                brand = snapshot?.Brand,
+                size = snapshot?.Size,
+                regular_price = snapshot?.RegularPrice,
+                promo_price = snapshot?.PromoPrice,
+                stock_level = snapshot?.StockLevel,
+                in_stock = IsInStock(snapshot?.StockLevel),
+                fulfillment = new
+                {
+                    curbside = snapshot?.Curbside,
+                    delivery = snapshot?.Delivery,
+                    in_store = snapshot?.InStore,
+                    ship_to_home = snapshot?.ShipToHome
+                }
+            });
+        }
+
+        return new
+        {
+            ok = true,
+            location_id = resolvedLocationId,
+            count = items.Count,
+            items
+        };
+    }
+
+    public async Task<object> AddToStagedCartAsync(KrogerStore store, string upc, int quantity)
+    {
+        var locationId = await store.GetDefaultStoreIdAsync();
+        var snapshot = await _productsClient.GetProductByUpcAsync(store, upc, locationId);
+
+        await store.AddStagedCartItemAsync(upc, quantity);
+
+        return new
+        {
+            ok = true,
+            upc,
+            quantity,
+            location_id = locationId,
+            staged = true,
+            product = new
+            {
+                product_id = snapshot?.ProductId,
+                description = snapshot?.Description,
+                stock_level = snapshot?.StockLevel
+            }
         };
     }
 
@@ -214,6 +287,99 @@ internal sealed class KrogerCartService
             stock_level = snapshot.StockLevel,
             allow_unknown_stock = allowUnknownStock,
             response = parsed
+        };
+    }
+
+    public async Task<object> ApplySavedCartAsync(
+        KrogerStore store,
+        string name,
+        bool dryRun,
+        bool allowUnknownStock)
+    {
+        var savedCart = await store.GetSavedCartAsync(name);
+        if (savedCart is null)
+        {
+            return new
+            {
+                ok = false,
+                error = "saved_cart_not_found",
+                name
+            };
+        }
+
+        var items = JsonSerializer.Deserialize<List<SavedCartItemPayload>>(savedCart.ItemsJson, SavedCartJsonOptions) ?? [];
+        var results = new List<object>();
+        var successCount = 0;
+
+        foreach (var item in items)
+        {
+            if (string.IsNullOrWhiteSpace(item.Upc) || item.Quantity <= 0)
+            {
+                results.Add(new
+                {
+                    ok = false,
+                    blocked = true,
+                    reason = "invalid_saved_cart_item",
+                    upc = item.Upc,
+                    quantity = item.Quantity
+                });
+                continue;
+            }
+
+            var result = await AddToCartAsync(store, item.Upc.Trim(), item.Quantity, dryRun, allowUnknownStock);
+            results.Add(result);
+
+            if (result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true)
+            {
+                successCount++;
+            }
+        }
+
+        return new
+        {
+            ok = true,
+            name = savedCart.Name,
+            dry_run = dryRun,
+            count = items.Count,
+            successful = successCount,
+            results
+        };
+    }
+
+    public async Task<object> CommitStagedCartAsync(
+        KrogerStore store,
+        bool dryRun,
+        bool allowUnknownStock,
+        bool clearOnSuccess)
+    {
+        var stagedItems = await store.GetStagedCartItemsAsync();
+        var results = new List<object>();
+        var successCount = 0;
+
+        foreach (var item in stagedItems)
+        {
+            var result = await AddToCartAsync(store, item.Upc, item.Quantity, dryRun, allowUnknownStock);
+            results.Add(result);
+
+            if (result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true)
+            {
+                successCount++;
+            }
+        }
+
+        if (!dryRun && clearOnSuccess && successCount == stagedItems.Count)
+        {
+            await store.ClearStagedCartAsync();
+        }
+
+        return new
+        {
+            ok = true,
+            dry_run = dryRun,
+            count = stagedItems.Count,
+            successful = successCount,
+            cleared_staged_cart = !dryRun && clearOnSuccess && successCount == stagedItems.Count,
+            results
         };
     }
 

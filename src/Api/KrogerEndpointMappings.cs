@@ -5,6 +5,7 @@ using KrogerShopperMcp.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using System.Text.Json;
 
 namespace KrogerShopperMcp.Api;
 
@@ -12,6 +13,109 @@ internal static class KrogerEndpointMappings
 {
     public static void MapKrogerEndpoints(this WebApplication app)
     {
+        app.MapGet("/setup", async (KrogerStore store) =>
+        {
+            if (await store.GetWebCredentialAsync() is not null)
+            {
+                return Results.Redirect("/");
+            }
+
+            return Results.Content(HtmlPages.RenderSetupPage(), "text/html; charset=utf-8");
+        });
+
+        app.MapPost("/setup", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        {
+            if (await store.GetWebCredentialAsync() is not null)
+            {
+                return Results.Redirect("/");
+            }
+
+            var form = await http.Request.ReadFormAsync();
+            var username = form["username"].ToString();
+            var password = form["password"].ToString();
+            var result = await webAuth.CreateInitialCredentialAsync(store, username, password);
+            if (!result.Ok)
+            {
+                return Results.Content(HtmlPages.RenderSetupPage(result.Error), "text/html; charset=utf-8");
+            }
+
+            var sessionId = await webAuth.CreateSessionAsync(store, username.Trim());
+            SetSessionCookie(http, sessionId);
+            return Results.Redirect("/");
+        });
+
+        app.MapGet("/login", async (KrogerStore store) =>
+        {
+            var credential = await store.GetWebCredentialAsync();
+            if (credential is null)
+            {
+                return Results.Redirect("/setup");
+            }
+
+            return Results.Content(HtmlPages.RenderLoginPage(credential.Username), "text/html; charset=utf-8");
+        });
+
+        app.MapPost("/login", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        {
+            var credential = await store.GetWebCredentialAsync();
+            if (credential is null)
+            {
+                return Results.Redirect("/setup");
+            }
+
+            var form = await http.Request.ReadFormAsync();
+            var username = form["username"].ToString();
+            var password = form["password"].ToString();
+            var isValid = await webAuth.ValidateCredentialAsync(store, username, password);
+            if (!isValid)
+            {
+                return Results.Content(HtmlPages.RenderLoginPage(credential.Username, "Invalid password."), "text/html; charset=utf-8");
+            }
+
+            var sessionId = await webAuth.CreateSessionAsync(store, credential.Username);
+            SetSessionCookie(http, sessionId);
+            return Results.Redirect("/");
+        });
+
+        app.MapGet("/change-password", async (HttpContext http, KrogerStore store) =>
+        {
+            var authResult = await RequireWebUiAuthAsync(http, store);
+            if (authResult.Result is not null)
+            {
+                return authResult.Result;
+            }
+
+            return Results.Content(HtmlPages.RenderChangePasswordPage(authResult.Username!), "text/html; charset=utf-8");
+        });
+
+        app.MapPost("/change-password", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        {
+            var authResult = await RequireWebUiAuthAsync(http, store);
+            if (authResult.Result is not null)
+            {
+                return authResult.Result;
+            }
+
+            var form = await http.Request.ReadFormAsync();
+            var currentPassword = form["current_password"].ToString();
+            var newPassword = form["new_password"].ToString();
+            var result = await webAuth.ChangePasswordAsync(store, currentPassword, newPassword);
+            if (!result.Ok)
+            {
+                return Results.Content(HtmlPages.RenderChangePasswordPage(authResult.Username!, result.Error), "text/html; charset=utf-8");
+            }
+
+            return Results.Content(HtmlPages.RenderChangePasswordPage(authResult.Username!, null, "Password updated."), "text/html; charset=utf-8");
+        });
+
+        app.MapGet("/logout", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        {
+            var sessionId = http.Request.Cookies[KrogerWebAuthService.SessionCookieName];
+            await webAuth.DeleteSessionAsync(store, sessionId);
+            ClearSessionCookie(http);
+            return Results.Redirect("/login");
+        });
+
         app.MapGet("/healthz", async (KrogerStore store) =>
         {
             var status = await store.GetTokenSummaryAsync();
@@ -24,16 +128,28 @@ internal static class KrogerEndpointMappings
             });
         });
 
-        app.MapGet("/", async (KrogerConfig config, KrogerStore store) =>
+        app.MapGet("/", async (HttpContext http, KrogerConfig config, KrogerStore store) =>
         {
+            var authResult = await RequireWebUiAuthAsync(http, store);
+            if (authResult.Result is not null)
+            {
+                return authResult.Result;
+            }
+
             var status = await store.GetTokenSummaryAsync();
             return Results.Content(
-                HtmlPages.RenderHomePage(config, status),
+                HtmlPages.RenderHomePage(config, status, authResult.Username!),
                 "text/html; charset=utf-8");
         });
 
         app.MapGet("/authorize", async (HttpContext http, KrogerOAuthClient oauthClient, KrogerStore store) =>
         {
+            var authResult = await RequireWebUiAuthAsync(http, store);
+            if (authResult.Result is not null)
+            {
+                return authResult.Result;
+            }
+
             var state = http.Request.Query["state"].ToString();
             if (string.IsNullOrWhiteSpace(state))
             {
@@ -47,6 +163,12 @@ internal static class KrogerEndpointMappings
 
         app.MapGet("/callback", async (HttpContext http, KrogerStore store, KrogerOAuthClient oauthClient) =>
         {
+            var authResult = await RequireWebUiAuthAsync(http, store);
+            if (authResult.Result is not null)
+            {
+                return authResult.Result;
+            }
+
             var error = http.Request.Query["error"].ToString();
             var errorDescription = http.Request.Query["error_description"].ToString();
             var state = http.Request.Query["state"].ToString();
@@ -207,6 +329,52 @@ internal static class KrogerEndpointMappings
                 request.IsAllowUnknownStock));
         });
 
+        app.MapGet("/api/staged-cart", async (HttpContext http, KrogerStore store, KrogerCartService cartService) =>
+        {
+            var locationId = http.Request.Query["locationId"].ToString();
+            if (string.IsNullOrWhiteSpace(locationId))
+            {
+                locationId = await store.GetDefaultStoreIdAsync() ?? string.Empty;
+            }
+
+            return Results.Json(await cartService.GetStagedCartInfoAsync(store, locationId));
+        });
+
+        app.MapPost("/api/add-to-staged-cart", async (KrogerAddToStagedCartRequest request, KrogerCartService cartService, KrogerStore store) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Upc))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing upc" });
+            }
+
+            var quantity = request.Quantity <= 0 ? 1 : request.Quantity;
+            return Results.Json(await cartService.AddToStagedCartAsync(store, request.Upc.Trim(), quantity));
+        });
+
+        app.MapPost("/api/remove-staged-cart-item", async (KrogerRemoveStagedCartItemRequest request, KrogerStore store) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Upc))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing upc" });
+            }
+
+            var result = await store.RemoveStagedCartItemAsync(request.Upc.Trim(), request.Quantity);
+            return Results.Json(new
+            {
+                ok = true,
+                scope = "staged_cart_only",
+                upc = request.Upc.Trim(),
+                removed = result.Removed,
+                remaining_quantity = result.RemainingQuantity
+            });
+        });
+
+        app.MapPost("/api/clear-staged-cart", async (KrogerStore store) =>
+        {
+            var removedCount = await store.ClearStagedCartAsync();
+            return Results.Json(new { ok = true, action = "clear_staged_cart", removed = removedCount });
+        });
+
         app.MapPost("/api/remove-tracked-cart-item", async (KrogerRemoveTrackedCartItemRequest request, KrogerStore store) =>
         {
             if (string.IsNullOrWhiteSpace(request.Upc))
@@ -223,6 +391,196 @@ internal static class KrogerEndpointMappings
                 removed = result.Removed,
                 remaining_quantity = result.RemainingQuantity
             });
+        });
+
+        app.MapPost("/api/mark-purchased", async (KrogerMarkPurchasedRequest request, KrogerStore store) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Upc))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing upc" });
+            }
+
+            DateTimeOffset? purchasedAtUtc = null;
+            if (!string.IsNullOrWhiteSpace(request.PurchasedAtUtc))
+            {
+                if (!DateTimeOffset.TryParse(request.PurchasedAtUtc, out var parsed))
+                {
+                    return Results.BadRequest(new { ok = false, error = "invalid purchasedAtUtc" });
+                }
+
+                purchasedAtUtc = parsed;
+            }
+
+            var purchased = await store.MarkTrackedCartItemPurchasedAsync(request.Upc.Trim(), request.Quantity, purchasedAtUtc);
+            if (purchased is null)
+            {
+                return Results.NotFound(new { ok = false, error = "tracked_cart_item_not_found", upc = request.Upc.Trim() });
+            }
+
+            return Results.Json(new
+            {
+                ok = true,
+                id = purchased.Id,
+                upc = purchased.Upc,
+                quantity = purchased.Quantity,
+                purchased_at_utc = purchased.PurchasedAtUtc.ToString("O")
+            });
+        });
+
+        app.MapPost("/api/clear-tracked-cart", async (KrogerClearTrackedCartRequest request, KrogerStore store) =>
+        {
+            DateTimeOffset? purchasedAtUtc = null;
+            if (!string.IsNullOrWhiteSpace(request.PurchasedAtUtc))
+            {
+                if (!DateTimeOffset.TryParse(request.PurchasedAtUtc, out var parsed))
+                {
+                    return Results.BadRequest(new { ok = false, error = "invalid purchasedAtUtc" });
+                }
+
+                purchasedAtUtc = parsed;
+            }
+
+            if (request.IsMarkPurchased)
+            {
+                var purchasedItems = await store.MarkAllTrackedCartItemsPurchasedAsync(purchasedAtUtc);
+                return Results.Json(new
+                {
+                    ok = true,
+                    action = "mark_purchased_and_clear",
+                    count = purchasedItems.Count,
+                    items = purchasedItems.Select(item => new
+                    {
+                        id = item.Id,
+                        upc = item.Upc,
+                        quantity = item.Quantity,
+                        purchased_at_utc = item.PurchasedAtUtc.ToString("O")
+                    })
+                });
+            }
+
+            var removedCount = await store.ClearTrackedCartAsync();
+            return Results.Json(new { ok = true, action = "clear_tracked_cart", removed = removedCount });
+        });
+
+        app.MapGet("/api/purchased-items", async (HttpContext http, KrogerStore store) =>
+        {
+            var limitRaw = http.Request.Query["limit"].ToString();
+            var limit = int.TryParse(limitRaw, out var parsedLimit)
+                ? Math.Clamp(parsedLimit, 1, 500)
+                : 100;
+            var items = await store.GetPurchasedItemsAsync(limit);
+            return Results.Json(new
+            {
+                ok = true,
+                count = items.Count,
+                items = items.Select(item => new
+                {
+                    id = item.Id,
+                    upc = item.Upc,
+                    quantity = item.Quantity,
+                    purchased_at_utc = item.PurchasedAtUtc.ToString("O")
+                })
+            });
+        });
+
+        app.MapPost("/api/save-cart", async (KrogerSaveCartRequest request, KrogerStore store) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing name" });
+            }
+
+            var savedCart = await store.SaveTrackedCartAsync(request.Name.Trim());
+            var items = JsonSerializer.Deserialize<object>(savedCart.ItemsJson);
+            return Results.Json(new
+            {
+                ok = true,
+                name = savedCart.Name,
+                created_at_utc = savedCart.CreatedAtUtc.ToString("O"),
+                updated_at_utc = savedCart.UpdatedAtUtc.ToString("O"),
+                items
+            });
+        });
+
+        app.MapPost("/api/save-staged-cart", async (KrogerSaveStagedCartRequest request, KrogerStore store) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing name" });
+            }
+
+            var savedCart = await store.SaveStagedCartAsync(request.Name.Trim());
+            var items = JsonSerializer.Deserialize<object>(savedCart.ItemsJson);
+            return Results.Json(new
+            {
+                ok = true,
+                name = savedCart.Name,
+                created_at_utc = savedCart.CreatedAtUtc.ToString("O"),
+                updated_at_utc = savedCart.UpdatedAtUtc.ToString("O"),
+                items
+            });
+        });
+
+        app.MapGet("/api/saved-carts", async (KrogerStore store) =>
+        {
+            var carts = await store.GetSavedCartsAsync();
+            return Results.Json(new
+            {
+                ok = true,
+                count = carts.Count,
+                carts = carts.Select(cart => new
+                {
+                    name = cart.Name,
+                    created_at_utc = cart.CreatedAtUtc.ToString("O"),
+                    updated_at_utc = cart.UpdatedAtUtc.ToString("O"),
+                    items = JsonSerializer.Deserialize<object>(cart.ItemsJson)
+                })
+            });
+        });
+
+        app.MapPost("/api/apply-saved-cart", async (KrogerApplySavedCartRequest request, KrogerStore store, KrogerCartService cartService) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing name" });
+            }
+
+            return Results.Json(await cartService.ApplySavedCartAsync(
+                store,
+                request.Name.Trim(),
+                request.IsDryRun,
+                request.IsAllowUnknownStock));
+        });
+
+        app.MapPost("/api/load-saved-cart-to-staged", async (KrogerLoadSavedCartToStagedRequest request, KrogerStore store) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+            {
+                return Results.BadRequest(new { ok = false, error = "missing name" });
+            }
+
+            var loadedCount = await store.LoadSavedCartIntoStagedAsync(request.Name.Trim(), request.IsReplaceExisting);
+            if (loadedCount < 0)
+            {
+                return Results.NotFound(new { ok = false, error = "saved_cart_not_found", name = request.Name.Trim() });
+            }
+
+            return Results.Json(new
+            {
+                ok = true,
+                name = request.Name.Trim(),
+                replace_existing = request.IsReplaceExisting,
+                loaded = loadedCount
+            });
+        });
+
+        app.MapPost("/api/commit-staged-cart", async (KrogerCommitStagedCartRequest request, KrogerStore store, KrogerCartService cartService) =>
+        {
+            return Results.Json(await cartService.CommitStagedCartAsync(
+                store,
+                request.IsDryRun,
+                request.IsAllowUnknownStock,
+                request.IsClearOnSuccess));
         });
 
         app.MapPost("/api/command", async (KrogerCommandRequest request, KrogerStore store, KrogerOAuthClient oauthClient, KrogerProductsClient productsClient, KrogerLocationsClient locationsClient, KrogerCartService cartService) =>
@@ -322,6 +680,51 @@ internal static class KrogerEndpointMappings
                             request.IsDryRun,
                             request.IsAllowUnknownStock));
                     }
+                case "staged-cart":
+                    {
+                        var locationId = request.LocationId;
+                        if (string.IsNullOrWhiteSpace(locationId))
+                        {
+                            locationId = await store.GetDefaultStoreIdAsync() ?? string.Empty;
+                        }
+
+                        return Results.Json(await cartService.GetStagedCartInfoAsync(store, locationId));
+                    }
+                case "add-to-staged-cart":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Upc))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing upc" });
+                        }
+
+                        var quantity = request.Quantity is > 0 ? request.Quantity.Value : 1;
+                        return Results.Json(await cartService.AddToStagedCartAsync(
+                            store,
+                            request.Upc.Trim(),
+                            quantity));
+                    }
+                case "remove-staged-cart-item":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Upc))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing upc" });
+                        }
+
+                        var result = await store.RemoveStagedCartItemAsync(request.Upc.Trim(), request.Quantity);
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            scope = "staged_cart_only",
+                            upc = request.Upc.Trim(),
+                            removed = result.Removed,
+                            remaining_quantity = result.RemainingQuantity
+                        });
+                    }
+                case "clear-staged-cart":
+                    {
+                        var removedCount = await store.ClearStagedCartAsync();
+                        return Results.Json(new { ok = true, action = "clear_staged_cart", removed = removedCount });
+                    }
                 case "remove-tracked-cart-item":
                     {
                         if (string.IsNullOrWhiteSpace(request.Upc))
@@ -339,9 +742,203 @@ internal static class KrogerEndpointMappings
                             remaining_quantity = result.RemainingQuantity
                         });
                     }
+                case "mark-purchased":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Upc))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing upc" });
+                        }
+
+                        var purchased = await store.MarkTrackedCartItemPurchasedAsync(request.Upc.Trim(), request.Quantity, null);
+                        if (purchased is null)
+                        {
+                            return Results.NotFound(new { ok = false, error = "tracked_cart_item_not_found", upc = request.Upc.Trim() });
+                        }
+
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            id = purchased.Id,
+                            upc = purchased.Upc,
+                            quantity = purchased.Quantity,
+                            purchased_at_utc = purchased.PurchasedAtUtc.ToString("O")
+                        });
+                    }
+                case "clear-tracked-cart":
+                    {
+                        var removedCount = await store.ClearTrackedCartAsync();
+                        return Results.Json(new { ok = true, action = "clear_tracked_cart", removed = removedCount });
+                    }
+                case "save-cart":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Label))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing label" });
+                        }
+
+                        var savedCart = await store.SaveTrackedCartAsync(request.Label.Trim());
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            name = savedCart.Name,
+                            created_at_utc = savedCart.CreatedAtUtc.ToString("O"),
+                            updated_at_utc = savedCart.UpdatedAtUtc.ToString("O"),
+                            items = JsonSerializer.Deserialize<object>(savedCart.ItemsJson)
+                        });
+                    }
+                case "save-staged-cart":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Label))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing label" });
+                        }
+
+                        var savedCart = await store.SaveStagedCartAsync(request.Label.Trim());
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            name = savedCart.Name,
+                            created_at_utc = savedCart.CreatedAtUtc.ToString("O"),
+                            updated_at_utc = savedCart.UpdatedAtUtc.ToString("O"),
+                            items = JsonSerializer.Deserialize<object>(savedCart.ItemsJson)
+                        });
+                    }
+                case "saved-carts":
+                    {
+                        var carts = await store.GetSavedCartsAsync();
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            count = carts.Count,
+                            carts = carts.Select(cart => new
+                            {
+                                name = cart.Name,
+                                created_at_utc = cart.CreatedAtUtc.ToString("O"),
+                                updated_at_utc = cart.UpdatedAtUtc.ToString("O"),
+                                items = JsonSerializer.Deserialize<object>(cart.ItemsJson)
+                            })
+                        });
+                    }
+                case "apply-saved-cart":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Label))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing label" });
+                        }
+
+                        return Results.Json(await cartService.ApplySavedCartAsync(
+                            store,
+                            request.Label.Trim(),
+                            request.IsDryRun,
+                            request.IsAllowUnknownStock));
+                    }
+                case "load-saved-cart-to-staged":
+                    {
+                        if (string.IsNullOrWhiteSpace(request.Label))
+                        {
+                            return Results.BadRequest(new { ok = false, error = "missing label" });
+                        }
+
+                        var loadedCount = await store.LoadSavedCartIntoStagedAsync(request.Label.Trim(), false);
+                        if (loadedCount < 0)
+                        {
+                            return Results.NotFound(new { ok = false, error = "saved_cart_not_found", name = request.Label.Trim() });
+                        }
+
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            name = request.Label.Trim(),
+                            replace_existing = false,
+                            loaded = loadedCount
+                        });
+                    }
+                case "commit-staged-cart":
+                    {
+                        return Results.Json(await cartService.CommitStagedCartAsync(
+                            store,
+                            request.IsDryRun,
+                            request.IsAllowUnknownStock,
+                            true));
+                    }
+                case "purchased-items":
+                    {
+                        var items = await store.GetPurchasedItemsAsync(request.Limit ?? 100);
+                        return Results.Json(new
+                        {
+                            ok = true,
+                            count = items.Count,
+                            items = items.Select(item => new
+                            {
+                                id = item.Id,
+                                upc = item.Upc,
+                                quantity = item.Quantity,
+                                purchased_at_utc = item.PurchasedAtUtc.ToString("O")
+                            })
+                        });
+                    }
                 default:
                     return Results.BadRequest(new { ok = false, error = "unknown command" });
             }
         });
+    }
+
+    private static async Task<(IResult? Result, string? Username)> RequireWebUiAuthAsync(HttpContext? http, KrogerStore store)
+    {
+        if (http is null)
+        {
+            return (Results.StatusCode(StatusCodes.Status500InternalServerError), null);
+        }
+
+        var credential = await store.GetWebCredentialAsync();
+        if (credential is null)
+        {
+            return (Results.Redirect("/setup"), null);
+        }
+
+        var webAuth = http.RequestServices.GetRequiredService<KrogerWebAuthService>();
+        var sessionId = http.Request.Cookies[KrogerWebAuthService.SessionCookieName];
+        var isAuthed = await webAuth.IsAuthenticatedAsync(store, sessionId);
+        if (!isAuthed)
+        {
+            return (Results.Redirect("/login"), null);
+        }
+
+        return (null, credential.Username);
+    }
+
+    private static void SetSessionCookie(HttpContext http, string sessionId)
+    {
+        http.Response.Cookies.Append(KrogerWebAuthService.SessionCookieName, sessionId, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = IsSecureRequest(http),
+            SameSite = SameSiteMode.Lax,
+            Expires = DateTimeOffset.UtcNow.AddDays(14),
+            IsEssential = true,
+            Path = "/"
+        });
+    }
+
+    private static void ClearSessionCookie(HttpContext http)
+    {
+        http.Response.Cookies.Delete(KrogerWebAuthService.SessionCookieName, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = IsSecureRequest(http),
+            SameSite = SameSiteMode.Lax,
+            Path = "/"
+        });
+    }
+
+    private static bool IsSecureRequest(HttpContext http)
+    {
+        if (http.Request.IsHttps)
+        {
+            return true;
+        }
+
+        var forwardedProto = http.Request.Headers["X-Forwarded-Proto"].ToString();
+        return string.Equals(forwardedProto, "https", StringComparison.OrdinalIgnoreCase);
     }
 }

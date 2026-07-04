@@ -18,6 +18,7 @@ The service is designed to sit between a Kroger shopper account and local automa
 ## Features
 
 - OAuth authorization code flow for Kroger shopper accounts
+- app-managed login gate for the authorize page with first-run credential setup
 - local SQLite storage for token metadata, pending OAuth state, settings, and tracked cart items
 - store search and default-store selection
 - product search scoped to a Kroger location
@@ -26,6 +27,9 @@ The service is designed to sit between a Kroger shopper account and local automa
   - out-of-stock blocking
   - optional override for `unknown_stock` cases
 - local tracked-cart inspection with live stock revalidation
+- staged cart composition before live Kroger commits
+- purchased-item history with quantities and timestamps
+- named saved carts backed by SQLite for quick reuse
 
 ## Configuration
 
@@ -52,6 +56,7 @@ Optional variables:
 
 - Secrets are not stored in tracked source files.
 - OAuth credentials should be provided through environment variables or an external env file.
+- The web login password is stored as a salted PBKDF2 hash in the local SQLite database; it is not kept in source control.
 - A sample local configuration file is provided at `.env.example`.
 - The env loader prefers an explicit `KROGER_ENV_FILE` path or repo-local env files, rather than walking arbitrary parent workspace paths.
 - On Unix-like systems, env files with group/other permissions are rejected by default unless `KROGER_ALLOW_INSECURE_ENV_FILE=true` is explicitly set.
@@ -117,7 +122,20 @@ Common local endpoints:
 - `POST /api/set-default-store`
 - `GET /api/cart-info`
 - `POST /api/add-to-cart`
+- `GET /api/staged-cart`
+- `POST /api/add-to-staged-cart`
+- `POST /api/remove-staged-cart-item`
+- `POST /api/clear-staged-cart`
 - `POST /api/remove-tracked-cart-item`
+- `POST /api/mark-purchased`
+- `POST /api/clear-tracked-cart`
+- `GET /api/purchased-items`
+- `POST /api/save-cart`
+- `POST /api/save-staged-cart`
+- `GET /api/saved-carts`
+- `POST /api/load-saved-cart-to-staged`
+- `POST /api/commit-staged-cart`
+- `POST /api/apply-saved-cart`
 - `POST /api/command`
 
 Example:

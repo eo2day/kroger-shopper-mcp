@@ -21,9 +21,40 @@ internal sealed record TrackedCartItem(
     int Quantity,
     DateTimeOffset UpdatedAtUtc);
 
+internal sealed record StagedCartItem(
+    string Upc,
+    int Quantity,
+    DateTimeOffset UpdatedAtUtc);
+
 internal sealed record TrackedCartRemovalResult(
     int Removed,
     int RemainingQuantity);
+
+internal sealed record PurchasedItem(
+    long Id,
+    string Upc,
+    int Quantity,
+    DateTimeOffset PurchasedAtUtc);
+
+internal sealed record WebCredential(
+    string Username,
+    string PasswordHash,
+    string PasswordSalt,
+    int PasswordIterations,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
+
+internal sealed record WebSession(
+    string SessionId,
+    string Username,
+    DateTimeOffset ExpiresAtUtc,
+    DateTimeOffset CreatedAtUtc);
+
+internal sealed record SavedCart(
+    string Name,
+    string ItemsJson,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
 
 internal sealed record TokenSummary(
     string Scope,
