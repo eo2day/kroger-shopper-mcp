@@ -5,6 +5,7 @@ using KrogerShopperMcp.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
 namespace KrogerShopperMcp.Api;
@@ -23,8 +24,9 @@ internal static class KrogerEndpointMappings
             return Results.Content(HtmlPages.RenderSetupPage(), "text/html; charset=utf-8");
         });
 
-        app.MapPost("/setup", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        app.MapPost("/setup", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth, ILoggerFactory loggerFactory) =>
         {
+            var logger = loggerFactory.CreateLogger("KrogerWebUi");
             if (await store.GetWebCredentialAsync() is not null)
             {
                 return Results.Redirect("/");
@@ -36,10 +38,12 @@ internal static class KrogerEndpointMappings
             var result = await webAuth.CreateInitialCredentialAsync(store, username, password);
             if (!result.Ok)
             {
+                logger.LogWarning("Initial web credential setup failed for username {Username}: {Error}", username.Trim(), result.Error);
                 return Results.Content(HtmlPages.RenderSetupPage(result.Error), "text/html; charset=utf-8");
             }
 
             var sessionId = await webAuth.CreateSessionAsync(store, username.Trim());
+            logger.LogInformation("Initial web credential created for username {Username}", username.Trim());
             SetSessionCookie(http, sessionId);
             return Results.Redirect("/");
         });
@@ -55,8 +59,9 @@ internal static class KrogerEndpointMappings
             return Results.Content(HtmlPages.RenderLoginPage(credential.Username), "text/html; charset=utf-8");
         });
 
-        app.MapPost("/login", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        app.MapPost("/login", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth, ILoggerFactory loggerFactory) =>
         {
+            var logger = loggerFactory.CreateLogger("KrogerWebUi");
             var credential = await store.GetWebCredentialAsync();
             if (credential is null)
             {
@@ -69,10 +74,12 @@ internal static class KrogerEndpointMappings
             var isValid = await webAuth.ValidateCredentialAsync(store, username, password);
             if (!isValid)
             {
+                logger.LogWarning("Web login failed for username {Username}", username.Trim());
                 return Results.Content(HtmlPages.RenderLoginPage(credential.Username, "Invalid password."), "text/html; charset=utf-8");
             }
 
             var sessionId = await webAuth.CreateSessionAsync(store, credential.Username);
+            logger.LogInformation("Web login succeeded for username {Username}", credential.Username);
             SetSessionCookie(http, sessionId);
             return Results.Redirect("/");
         });
@@ -88,8 +95,9 @@ internal static class KrogerEndpointMappings
             return Results.Content(HtmlPages.RenderChangePasswordPage(authResult.Username!), "text/html; charset=utf-8");
         });
 
-        app.MapPost("/change-password", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        app.MapPost("/change-password", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth, ILoggerFactory loggerFactory) =>
         {
+            var logger = loggerFactory.CreateLogger("KrogerWebUi");
             var authResult = await RequireWebUiAuthAsync(http, store);
             if (authResult.Result is not null)
             {
@@ -102,17 +110,21 @@ internal static class KrogerEndpointMappings
             var result = await webAuth.ChangePasswordAsync(store, currentPassword, newPassword);
             if (!result.Ok)
             {
+                logger.LogWarning("Password change failed for username {Username}: {Error}", authResult.Username!, result.Error);
                 return Results.Content(HtmlPages.RenderChangePasswordPage(authResult.Username!, result.Error), "text/html; charset=utf-8");
             }
 
+            logger.LogInformation("Password changed for username {Username}", authResult.Username!);
             return Results.Content(HtmlPages.RenderChangePasswordPage(authResult.Username!, null, "Password updated."), "text/html; charset=utf-8");
         });
 
-        app.MapGet("/logout", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth) =>
+        app.MapGet("/logout", async (HttpContext http, KrogerStore store, KrogerWebAuthService webAuth, ILoggerFactory loggerFactory) =>
         {
+            var logger = loggerFactory.CreateLogger("KrogerWebUi");
             var sessionId = http.Request.Cookies[KrogerWebAuthService.SessionCookieName];
             await webAuth.DeleteSessionAsync(store, sessionId);
             ClearSessionCookie(http);
+            logger.LogInformation("Web logout completed");
             return Results.Redirect("/login");
         });
 
@@ -142,8 +154,9 @@ internal static class KrogerEndpointMappings
                 "text/html; charset=utf-8");
         });
 
-        app.MapGet("/authorize", async (HttpContext http, KrogerOAuthClient oauthClient, KrogerStore store) =>
+        app.MapGet("/authorize", async (HttpContext http, KrogerOAuthClient oauthClient, KrogerStore store, ILoggerFactory loggerFactory) =>
         {
+            var logger = loggerFactory.CreateLogger("KrogerOAuthFlow");
             var authResult = await RequireWebUiAuthAsync(http, store);
             if (authResult.Result is not null)
             {
@@ -158,11 +171,13 @@ internal static class KrogerEndpointMappings
 
             var scopes = oauthClient.ParseScopes(http.Request.Query["scopes"].ToString());
             await store.SavePendingStateAsync(state, scopes);
+            logger.LogInformation("Starting Kroger authorize redirect for state {State} with scopes {Scopes}", state, string.Join(' ', scopes));
             return Results.Redirect(oauthClient.BuildAuthorizeUrl(state, scopes));
         });
 
-        app.MapGet("/callback", async (HttpContext http, KrogerStore store, KrogerOAuthClient oauthClient) =>
+        app.MapGet("/callback", async (HttpContext http, KrogerStore store, KrogerOAuthClient oauthClient, ILoggerFactory loggerFactory) =>
         {
+            var logger = loggerFactory.CreateLogger("KrogerOAuthFlow");
             var authResult = await RequireWebUiAuthAsync(http, store);
             if (authResult.Result is not null)
             {
@@ -176,6 +191,7 @@ internal static class KrogerEndpointMappings
 
             if (!string.IsNullOrWhiteSpace(error))
             {
+                logger.LogWarning("Kroger callback returned oauth error {Error} for state {State}: {ErrorDescription}", error, state ?? "(none)", errorDescription);
                 return Results.Content(
                     HtmlPages.RenderCallbackPage(false, $"OAuth error: {error}", errorDescription, state),
                     "text/html; charset=utf-8");
@@ -183,6 +199,7 @@ internal static class KrogerEndpointMappings
 
             if (string.IsNullOrWhiteSpace(code))
             {
+                logger.LogWarning("Kroger callback reached service without authorization code for state {State}", state ?? "(none)");
                 return Results.Content(
                     HtmlPages.RenderCallbackPage(
                         false,
@@ -197,6 +214,7 @@ internal static class KrogerEndpointMappings
                 var scope = await store.GetScopeForStateAsync(state) ?? oauthClient.DefaultScopeString;
                 await oauthClient.ExchangeAuthorizationCodeAsync(store, code, state, scope);
                 var status = await store.GetTokenSummaryAsync();
+                logger.LogInformation("Kroger callback exchange completed for state {State}", state ?? "(none)");
 
                 return Results.Content(
                     HtmlPages.RenderCallbackPage(
@@ -208,7 +226,7 @@ internal static class KrogerEndpointMappings
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"OAuth callback failed: {ex.Message}");
+                logger.LogError(ex, "Kroger callback token exchange failed for state {State}", state ?? "(none)");
                 return Results.Content(
                     HtmlPages.RenderCallbackPage(
                         false,

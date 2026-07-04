@@ -197,6 +197,27 @@ systemctl --user status kroger-shopper-mcp.service
 
 For internet-facing deployments, place a reverse proxy in front of the local service for TLS termination and public callback routing. The app provides its own login gate so the web authorize flow is protected; on first visit, go to `/setup` to create the initial username and password.
 
+## Logging
+
+When the service runs under `systemd`, application logs go to the user journal.
+
+Useful commands:
+
+```bash
+systemctl --user status kroger-shopper-mcp.service
+journalctl --user -u kroger-shopper-mcp.service -n 100 --no-pager
+journalctl --user -u kroger-shopper-mcp.service -f
+```
+
+The service now emits structured operational logs for:
+
+- startup with service URL and DB path
+- web login/setup/password-change attempts
+- OAuth authorize redirects, callback failures, token exchange, and token refresh
+- product/location API failures
+- blocked cart adds (missing product, out of stock, unknown stock)
+- staged-cart commits and live add-to-cart failures
+
 ## Status
 
 The current implementation is a local HTTP service that can support MCP-style orchestration, but it is not yet packaged as a formal MCP server.

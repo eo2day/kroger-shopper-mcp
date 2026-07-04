@@ -2,6 +2,7 @@ using KrogerShopperMcp.Configuration;
 using KrogerShopperMcp.Infrastructure;
 using KrogerShopperMcp.Services;
 using KrogerShopperMcp.Utilities;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace KrogerShopperMcp.App;
 
@@ -56,7 +57,7 @@ internal sealed class KrogerApplication
             DefaultScopes);
 
         var store = new KrogerStore(config.DbPath);
-        var oauthClient = new KrogerOAuthClient(config, DefaultScopes);
+        var oauthClient = new KrogerOAuthClient(config, DefaultScopes, NullLogger<KrogerOAuthClient>.Instance);
         await store.InitializeAsync();
         await store.SavePendingStateAsync(state, scopes);
 
@@ -73,7 +74,7 @@ internal sealed class KrogerApplication
             DefaultScopes);
 
         var store = new KrogerStore(config.DbPath);
-        var oauthClient = new KrogerOAuthClient(config, DefaultScopes);
+        var oauthClient = new KrogerOAuthClient(config, DefaultScopes, NullLogger<KrogerOAuthClient>.Instance);
         await store.InitializeAsync();
 
         await oauthClient.ExchangeAuthorizationCodeAsync(store, code, state, string.Join(' ', scopes));
@@ -111,7 +112,7 @@ internal sealed class KrogerApplication
     private static async Task<int> RefreshTokenAsync(KrogerConfig config)
     {
         var store = new KrogerStore(config.DbPath);
-        var oauthClient = new KrogerOAuthClient(config, DefaultScopes);
+        var oauthClient = new KrogerOAuthClient(config, DefaultScopes, NullLogger<KrogerOAuthClient>.Instance);
         await store.InitializeAsync();
         var token = await oauthClient.RefreshTokenAsync(store);
 

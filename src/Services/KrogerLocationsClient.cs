@@ -1,16 +1,19 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using KrogerShopperMcp.Infrastructure;
+using Microsoft.Extensions.Logging;
 
 namespace KrogerShopperMcp.Services;
 
 internal sealed class KrogerLocationsClient
 {
     private readonly KrogerOAuthClient _oauthClient;
+    private readonly ILogger<KrogerLocationsClient> _logger;
 
-    public KrogerLocationsClient(KrogerOAuthClient oauthClient)
+    public KrogerLocationsClient(KrogerOAuthClient oauthClient, ILogger<KrogerLocationsClient> logger)
     {
         _oauthClient = oauthClient;
+        _logger = logger;
     }
 
     public async Task<object> SearchLocationsAsync(KrogerStore store, string zipCode, string? chain, int limit)
@@ -38,6 +41,13 @@ internal sealed class KrogerLocationsClient
 
         if (!response.IsSuccessStatusCode)
         {
+            _logger.LogWarning(
+                "Kroger location search failed for zip {ZipCode} chain {Chain} with status {StatusCode} {ReasonPhrase}. Body: {Body}",
+                zipCode,
+                chain ?? "(any)",
+                (int)response.StatusCode,
+                response.ReasonPhrase,
+                SummarizeBody(body));
             return new
             {
                 ok = false,
@@ -89,5 +99,16 @@ internal sealed class KrogerLocationsClient
             count = items.Count,
             items
         };
+    }
+
+    private static string SummarizeBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "(empty)";
+        }
+
+        const int maxLength = 400;
+        return body.Length <= maxLength ? body : $"{body[..maxLength]}...";
     }
 }

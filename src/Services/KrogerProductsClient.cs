@@ -2,16 +2,19 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using KrogerShopperMcp.Infrastructure;
 using KrogerShopperMcp.Models;
+using Microsoft.Extensions.Logging;
 
 namespace KrogerShopperMcp.Services;
 
 internal sealed class KrogerProductsClient
 {
     private readonly KrogerOAuthClient _oauthClient;
+    private readonly ILogger<KrogerProductsClient> _logger;
 
-    public KrogerProductsClient(KrogerOAuthClient oauthClient)
+    public KrogerProductsClient(KrogerOAuthClient oauthClient, ILogger<KrogerProductsClient> logger)
     {
         _oauthClient = oauthClient;
+        _logger = logger;
     }
 
     public async Task<KrogerProductSnapshot?> GetProductByUpcAsync(KrogerStore store, string upc, string? locationId)
@@ -39,6 +42,13 @@ internal sealed class KrogerProductsClient
         var body = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
         {
+            _logger.LogWarning(
+                "Kroger product lookup failed for upc {Upc} at location {LocationId} with status {StatusCode} {ReasonPhrase}. Body: {Body}",
+                upc,
+                locationId ?? "(default)",
+                (int)response.StatusCode,
+                response.ReasonPhrase,
+                SummarizeBody(body));
             return null;
         }
 
@@ -85,6 +95,13 @@ internal sealed class KrogerProductsClient
 
         if (!response.IsSuccessStatusCode)
         {
+            _logger.LogWarning(
+                "Kroger product search failed for query {Query} at location {LocationId} with status {StatusCode} {ReasonPhrase}. Body: {Body}",
+                query,
+                locationId ?? "(default)",
+                (int)response.StatusCode,
+                response.ReasonPhrase,
+                SummarizeBody(body));
             return new
             {
                 ok = false,
@@ -138,6 +155,17 @@ internal sealed class KrogerProductsClient
             count = items.Count,
             items
         };
+    }
+
+    private static string SummarizeBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "(empty)";
+        }
+
+        const int maxLength = 400;
+        return body.Length <= maxLength ? body : $"{body[..maxLength]}...";
     }
 
     private static KrogerProductSnapshot? ParseProductSnapshot(JsonElement product)

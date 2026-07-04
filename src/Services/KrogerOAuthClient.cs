@@ -3,6 +3,7 @@ using KrogerShopperMcp.Configuration;
 using KrogerShopperMcp.Infrastructure;
 using KrogerShopperMcp.Models;
 using KrogerShopperMcp.Utilities;
+using Microsoft.Extensions.Logging;
 
 namespace KrogerShopperMcp.Services;
 
@@ -10,11 +11,13 @@ internal sealed class KrogerOAuthClient
 {
     private readonly KrogerConfig _config;
     private readonly IReadOnlyList<string> _defaultScopes;
+    private readonly ILogger<KrogerOAuthClient> _logger;
 
-    public KrogerOAuthClient(KrogerConfig config, IReadOnlyList<string> defaultScopes)
+    public KrogerOAuthClient(KrogerConfig config, IReadOnlyList<string> defaultScopes, ILogger<KrogerOAuthClient> logger)
     {
         _config = config;
         _defaultScopes = defaultScopes;
+        _logger = logger;
     }
 
     public IReadOnlyList<string> DefaultScopes => _defaultScopes;
@@ -52,6 +55,7 @@ internal sealed class KrogerOAuthClient
         string? state,
         string scope)
     {
+        _logger.LogInformation("Starting Kroger token exchange for state {State}", state ?? "(none)");
         using var client = new HttpClient();
         using var request = new HttpRequestMessage(HttpMethod.Post, _config.TokenUrl);
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", _config.GetBasicAuthToken());
@@ -67,6 +71,12 @@ internal sealed class KrogerOAuthClient
 
         if (!response.IsSuccessStatusCode)
         {
+            _logger.LogWarning(
+                "Kroger token exchange failed with status {StatusCode} {ReasonPhrase} for state {State}. Body: {Body}",
+                (int)response.StatusCode,
+                response.ReasonPhrase,
+                state ?? "(none)",
+                SummarizeBody(body));
             throw new InvalidOperationException($"token exchange failed: {(int)response.StatusCode} {response.ReasonPhrase}");
         }
 
@@ -78,6 +88,7 @@ internal sealed class KrogerOAuthClient
             : await store.GetScopeForStateAsync(state) ?? scope;
 
         await store.UpsertTokenAsync(token, resolvedScope);
+        _logger.LogInformation("Kroger token exchange succeeded for state {State} with scope {Scope}", state ?? "(none)", resolvedScope);
         return token;
     }
 
@@ -86,9 +97,11 @@ internal sealed class KrogerOAuthClient
         var existing = await store.GetStoredTokenAsync();
         if (existing is null || string.IsNullOrWhiteSpace(existing.RefreshToken))
         {
+            _logger.LogWarning("Kroger token refresh requested but no refresh token is stored");
             throw new InvalidOperationException("no refresh token stored");
         }
 
+        _logger.LogInformation("Refreshing Kroger access token");
         using var client = new HttpClient();
         using var request = new HttpRequestMessage(HttpMethod.Post, _config.TokenUrl);
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", _config.GetBasicAuthToken());
@@ -103,6 +116,11 @@ internal sealed class KrogerOAuthClient
 
         if (!response.IsSuccessStatusCode)
         {
+            _logger.LogWarning(
+                "Kroger token refresh failed with status {StatusCode} {ReasonPhrase}. Body: {Body}",
+                (int)response.StatusCode,
+                response.ReasonPhrase,
+                SummarizeBody(body));
             throw new InvalidOperationException($"refresh failed: {(int)response.StatusCode} {response.ReasonPhrase}");
         }
 
@@ -110,6 +128,7 @@ internal sealed class KrogerOAuthClient
                     ?? throw new InvalidOperationException("refresh response was empty");
 
         await store.UpsertTokenAsync(token, existing.Scope);
+        _logger.LogInformation("Kroger token refresh succeeded; expires in {ExpiresIn} seconds", token.ExpiresIn);
         return token;
     }
 
@@ -118,15 +137,28 @@ internal sealed class KrogerOAuthClient
         var existing = await store.GetStoredTokenAsync();
         if (existing is null)
         {
+            _logger.LogWarning("Kroger access token requested but none is stored");
             throw new InvalidOperationException("no stored Kroger token");
         }
 
         if (existing.ExpiresAtUtc <= DateTimeOffset.UtcNow.AddMinutes(1))
         {
+            _logger.LogInformation("Stored Kroger access token is expiring soon; refreshing automatically");
             var refreshed = await RefreshTokenAsync(store);
             return refreshed.AccessToken;
         }
 
         return existing.AccessToken;
+    }
+
+    private static string SummarizeBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "(empty)";
+        }
+
+        const int maxLength = 400;
+        return body.Length <= maxLength ? body : $"{body[..maxLength]}...";
     }
 }
