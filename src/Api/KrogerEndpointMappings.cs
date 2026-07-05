@@ -859,10 +859,13 @@ internal static class KrogerEndpointMappings
                 return authResult.Result;
             }
 
+            var request = await http.Request.ReadFromJsonAsync<KrogerSendTrackedCartRequest>();
+            var allowUnknownStock = request?.IsAllowUnknownStock ?? false;
+
             return Results.Json(await cartService.SendWorkingCartAsync(
                 store,
                 dryRun: false,
-                allowUnknownStock: true,
+                allowUnknownStock: allowUnknownStock,
                 clearOnSuccess: true));
         });
 

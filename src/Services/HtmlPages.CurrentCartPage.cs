@@ -247,6 +247,10 @@ internal static partial class HtmlPages
               <div class="cart-action-row">
                 <button id="send-to-kroger-button" class="button" type="button">Send to Kroger</button>
                 <button id="clear-cart-button" class="danger-button" type="button">Clear Cart</button>
+                <label class="checkbox-label" style="display:inline-flex;align-items:center;gap:8px;margin-left:8px;">
+                  <input id="allow-unknown-stock" type="checkbox">
+                  <span class="meta">Allow unknown stock</span>
+                </label>
               </div>
 
               <details class="expander">
@@ -669,10 +673,13 @@ internal static partial class HtmlPages
                 return;
               }
 
+              const allowUnknownStock = document.getElementById("allow-unknown-stock").checked;
               setStatus("Sending working cart to Kroger...");
               const response = await fetch("/api/send-tracked-cart", {
                 method: "POST",
-                credentials: "same-origin"
+                credentials: "same-origin",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ allow_unknown_stock: allowUnknownStock })
               });
 
               const payload = await handleApiResponse(response);

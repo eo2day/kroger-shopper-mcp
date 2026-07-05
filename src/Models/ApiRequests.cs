@@ -70,6 +70,14 @@ internal sealed class KrogerMarkPurchasedRequest
     public string? PurchasedAtUtc { get; init; }
 }
 
+internal sealed class KrogerSendTrackedCartRequest
+{
+    public bool? AllowUnknownStock { get; init; }
+    [JsonPropertyName("allow_unknown_stock")]
+    public bool? AllowUnknownStockAlias { get; init; }
+    public bool IsAllowUnknownStock => AllowUnknownStock == true || AllowUnknownStockAlias == true;
+}
+
 internal sealed class KrogerSaveCartRequest
 {
     public string? Name { get; init; }
