@@ -83,6 +83,11 @@ internal sealed class KrogerStore
         await cmd.ExecuteNonQueryAsync();
 
         await EnsureCreatedAtColumnAsync(db, "staged_cart_items");
+        await EnsureCreatedAtColumnAsync(db, "oauth_tokens");
+        await EnsureCreatedAtColumnAsync(db, "oauth_states");
+        await EnsureCreatedAtColumnAsync(db, "saved_carts");
+        await EnsureCreatedAtColumnAsync(db, "web_credentials");
+        await EnsureCreatedAtColumnAsync(db, "web_sessions");
         await MigrateTrackedCartIntoStagedAsync(db);
         await DropLegacyCartTablesAsync(db);
     }
@@ -899,14 +904,19 @@ internal sealed class KrogerStore
         pragmaCmd.CommandText = $"pragma table_info({tableName})";
 
         var hasCreatedAt = false;
+        var hasUpdatedAt = false;
         await using (var reader = await pragmaCmd.ExecuteReaderAsync())
         {
             while (await reader.ReadAsync())
             {
-                if (string.Equals(reader.GetString(1), "created_at_utc", StringComparison.OrdinalIgnoreCase))
+                var colName = reader.GetString(1);
+                if (string.Equals(colName, "created_at_utc", StringComparison.OrdinalIgnoreCase))
                 {
                     hasCreatedAt = true;
-                    break;
+                }
+                if (string.Equals(colName, "updated_at_utc", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasUpdatedAt = true;
                 }
             }
         }
@@ -918,8 +928,15 @@ internal sealed class KrogerStore
             await alterCmd.ExecuteNonQueryAsync();
         }
 
+        var fallback = DateTimeOffset.UtcNow.ToString("O");
         var backfillCmd = db.CreateCommand();
-        backfillCmd.CommandText = $"update {tableName} set created_at_utc = updated_at_utc where created_at_utc is null or trim(created_at_utc) = ''";
+        backfillCmd.CommandText = hasUpdatedAt
+            ? $"update {tableName} set created_at_utc = updated_at_utc where created_at_utc is null or trim(created_at_utc) = ''"
+            : $"update {tableName} set created_at_utc = $fallback where created_at_utc is null or trim(created_at_utc) = ''";
+        if (!hasUpdatedAt)
+        {
+            backfillCmd.Parameters.AddWithValue("$fallback", fallback);
+        }
         await backfillCmd.ExecuteNonQueryAsync();
     }
 
