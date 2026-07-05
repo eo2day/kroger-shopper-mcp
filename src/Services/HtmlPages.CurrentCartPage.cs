@@ -227,6 +227,7 @@ internal static partial class HtmlPages
               <div class="actions">
                 <a class="ghost-link" href="/">Home</a>
                 <a class="ghost-link" href="/saved-carts">Saved Carts</a>
+                <a class="ghost-link" href="/sent-history">Sent History</a>
               </div>
             </div>
 
