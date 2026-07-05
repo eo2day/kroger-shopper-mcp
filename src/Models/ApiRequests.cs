@@ -12,8 +12,10 @@ internal sealed class KrogerCommandRequest
     public int? Limit { get; init; }
     public string? ZipCode { get; init; }
     public string? Chain { get; init; }
+    public string? Name { get; init; }
     public string? Label { get; init; }
     public string? Upc { get; init; }
+    public string? Identifier { get; init; }
     public int? Quantity { get; init; }
     public string? Modality { get; init; }
     public bool? DryRun { get; init; }
@@ -55,6 +57,12 @@ internal sealed class KrogerRemoveTrackedCartItemRequest
     public int? Quantity { get; init; }
 }
 
+internal sealed class KrogerSetTrackedCartItemQuantityRequest
+{
+    public string? Upc { get; init; }
+    public int Quantity { get; init; }
+}
+
 internal sealed class KrogerMarkPurchasedRequest
 {
     public string? Upc { get; init; }
@@ -73,6 +81,49 @@ internal sealed class KrogerClearTrackedCartRequest
 internal sealed class KrogerSaveCartRequest
 {
     public string? Name { get; init; }
+}
+
+internal sealed class KrogerRenameSavedCartRequest
+{
+    public string? Name { get; init; }
+    public string? NewName { get; init; }
+}
+
+internal sealed class KrogerDuplicateSavedCartRequest
+{
+    public string? Name { get; init; }
+    public string? NewName { get; init; }
+}
+
+internal sealed class KrogerDeleteSavedCartRequest
+{
+    public string? Name { get; init; }
+}
+
+internal sealed class KrogerSetSavedCartItemQuantityRequest
+{
+    public string? Name { get; init; }
+    public string? Upc { get; init; }
+    public int Quantity { get; init; }
+}
+
+internal sealed class KrogerAddSavedCartItemRequest
+{
+    public string? Name { get; init; }
+    public string? Identifier { get; init; }
+    public int Quantity { get; init; }
+}
+
+internal sealed class KrogerAddTrackedCartItemRequest
+{
+    public string? Identifier { get; init; }
+    public int Quantity { get; init; }
+}
+
+internal sealed class KrogerRemoveSavedCartItemRequest
+{
+    public string? Name { get; init; }
+    public string? Upc { get; init; }
 }
 
 internal sealed class KrogerApplySavedCartRequest

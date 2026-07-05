@@ -19,11 +19,13 @@ internal sealed record StoredToken(
 internal sealed record TrackedCartItem(
     string Upc,
     int Quantity,
+    DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
 internal sealed record StagedCartItem(
     string Upc,
     int Quantity,
+    DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
 internal sealed record TrackedCartRemovalResult(
@@ -68,6 +70,8 @@ internal sealed record TokenSummary(
 internal sealed record KrogerProductSnapshot(
     string? ProductId,
     string Upc,
+    string? ProductPageUri,
+    string? ImageUrl,
     string? Description,
     string? Brand,
     string? Size,

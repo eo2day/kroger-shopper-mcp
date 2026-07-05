@@ -136,6 +136,11 @@ Common local endpoints:
 - `POST /api/save-cart`
 - `POST /api/save-staged-cart`
 - `GET /api/saved-carts`
+- `GET /api/saved-carts-view`
+- `POST /api/saved-carts-add-item`
+- `POST /api/saved-carts-set-quantity`
+- `POST /api/saved-carts-remove-item`
+- `POST /api/current-cart-add-item`
 - `POST /api/load-saved-cart-to-staged`
 - `POST /api/commit-staged-cart`
 - `POST /api/apply-saved-cart`

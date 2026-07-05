@@ -11,6 +11,7 @@ namespace KrogerShopperMcp.Services;
 internal sealed class KrogerCartService
 {
     private sealed record SavedCartItemPayload(string? Upc, int Quantity);
+    private const string KrogerWebBaseUrl = "https://www.kroger.com";
     private static readonly JsonSerializerOptions SavedCartJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -145,7 +146,8 @@ internal sealed class KrogerCartService
         string upc,
         int quantity,
         bool dryRun,
-        bool allowUnknownStock)
+        bool allowUnknownStock,
+        bool trackLocally = true)
     {
         var locationId = await store.GetDefaultStoreIdAsync();
         var snapshot = await _productsClient.GetProductByUpcAsync(store, upc, locationId);
@@ -295,8 +297,17 @@ internal sealed class KrogerCartService
             }
         }
 
-        await store.AddTrackedCartItemAsync(upc, quantity);
-        _logger.LogInformation("Added item to live Kroger cart: upc {Upc}, quantity {Quantity}, location {LocationId}", upc, quantity, locationId ?? "(default)");
+        if (trackLocally)
+        {
+            await store.AddTrackedCartItemAsync(upc, quantity);
+        }
+
+        _logger.LogInformation(
+            "Added item to live Kroger cart: upc {Upc}, quantity {Quantity}, location {LocationId}, trackLocally={TrackLocally}",
+            upc,
+            quantity,
+            locationId ?? "(default)",
+            trackLocally);
 
         return new
         {
@@ -368,6 +379,142 @@ internal sealed class KrogerCartService
         };
     }
 
+    public async Task<object> GetSavedCartsBrowserDataAsync(KrogerStore store)
+    {
+        var locationId = await store.GetDefaultStoreIdAsync();
+        var carts = await store.GetSavedCartsAsync();
+        var parsedCarts = carts
+            .OrderByDescending(cart => cart.UpdatedAtUtc)
+            .Select(cart => new
+            {
+                Cart = cart,
+                Items = JsonSerializer.Deserialize<List<SavedCartItemPayload>>(cart.ItemsJson, SavedCartJsonOptions) ?? []
+            })
+            .ToList();
+        var snapshotsByUpc = await _productsClient.GetProductsByUpcsAsync(
+            store,
+            parsedCarts.SelectMany(static cart => cart.Items)
+                .Where(static item => !string.IsNullOrWhiteSpace(item.Upc) && item.Quantity > 0)
+                .Select(static item => item.Upc!),
+            locationId);
+        var cartViews = new List<object>();
+
+        foreach (var cartEntry in parsedCarts)
+        {
+            var cart = cartEntry.Cart;
+            var savedItems = cartEntry.Items;
+            var itemViews = new List<object>();
+            decimal? cartTotal = 0m;
+
+            foreach (var savedItem in savedItems)
+            {
+                if (string.IsNullOrWhiteSpace(savedItem.Upc) || savedItem.Quantity <= 0)
+                {
+                    continue;
+                }
+
+                var upc = savedItem.Upc.Trim();
+                snapshotsByUpc.TryGetValue(upc, out var snapshot);
+                var unitPrice = snapshot?.PromoPrice ?? snapshot?.RegularPrice;
+                var totalPrice = unitPrice is decimal price ? price * savedItem.Quantity : (decimal?)null;
+                if (totalPrice is not null)
+                {
+                    cartTotal += totalPrice.Value;
+                }
+
+                itemViews.Add(new
+                {
+                    upc,
+                    quantity = savedItem.Quantity,
+                    product_id = snapshot?.ProductId,
+                    description = snapshot?.Description,
+                    brand = snapshot?.Brand,
+                    size = snapshot?.Size,
+                    image_url = snapshot?.ImageUrl,
+                    product_url = BuildProductUrl(snapshot),
+                    unit_price = unitPrice,
+                    regular_price = snapshot?.RegularPrice,
+                    promo_price = snapshot?.PromoPrice,
+                    total_price = totalPrice
+                });
+            }
+
+            cartViews.Add(new
+            {
+                name = cart.Name,
+                created_at_utc = cart.CreatedAtUtc.ToString("O"),
+                updated_at_utc = cart.UpdatedAtUtc.ToString("O"),
+                item_count = itemViews.Count,
+                total_quantity = savedItems.Where(item => !string.IsNullOrWhiteSpace(item.Upc) && item.Quantity > 0).Sum(item => item.Quantity),
+                total_price = itemViews.Count == 0 ? null : cartTotal,
+                items = itemViews
+            });
+        }
+
+        return new
+        {
+            ok = true,
+            location_id = locationId,
+            count = cartViews.Count,
+            carts = cartViews
+        };
+    }
+
+    public async Task<object> GetCurrentCartBrowserDataAsync(KrogerStore store, string? locationId)
+    {
+        var trackedItems = await store.GetTrackedCartItemsAsync();
+        var resolvedLocationId = string.IsNullOrWhiteSpace(locationId)
+            ? await store.GetDefaultStoreIdAsync()
+            : locationId;
+        var snapshotsByUpc = await _productsClient.GetProductsByUpcsAsync(
+            store,
+            trackedItems.Select(static item => item.Upc),
+            resolvedLocationId);
+
+        var itemViews = new List<object>();
+        decimal? totalPrice = 0m;
+
+        foreach (var trackedItem in trackedItems)
+        {
+            snapshotsByUpc.TryGetValue(trackedItem.Upc, out var snapshot);
+            var unitPrice = snapshot?.PromoPrice ?? snapshot?.RegularPrice;
+            var lineTotal = unitPrice is decimal price ? price * trackedItem.Quantity : (decimal?)null;
+            if (lineTotal is not null)
+            {
+                totalPrice += lineTotal.Value;
+            }
+
+            itemViews.Add(new
+            {
+                upc = trackedItem.Upc,
+                quantity = trackedItem.Quantity,
+                updated_at_utc = trackedItem.UpdatedAtUtc.ToString("O"),
+                product_id = snapshot?.ProductId,
+                description = snapshot?.Description,
+                brand = snapshot?.Brand,
+                size = snapshot?.Size,
+                image_url = snapshot?.ImageUrl,
+                product_url = BuildProductUrl(snapshot),
+                unit_price = unitPrice,
+                regular_price = snapshot?.RegularPrice,
+                promo_price = snapshot?.PromoPrice,
+                total_price = lineTotal,
+                stock_level = snapshot?.StockLevel,
+                in_stock = IsInStock(snapshot?.StockLevel)
+            });
+        }
+
+        return new
+        {
+            ok = true,
+            location_id = resolvedLocationId,
+            count = itemViews.Count,
+            total_quantity = trackedItems.Sum(item => item.Quantity),
+            total_price = itemViews.Count == 0 ? null : totalPrice,
+            items = itemViews
+        };
+    }
+
     public async Task<object> CommitStagedCartAsync(
         KrogerStore store,
         bool dryRun,
@@ -412,6 +559,49 @@ internal sealed class KrogerCartService
         };
     }
 
+    public async Task<object> CommitTrackedCartAsync(
+        KrogerStore store,
+        bool dryRun,
+        bool allowUnknownStock)
+    {
+        var trackedItems = await store.GetTrackedCartItemsAsync();
+        _logger.LogInformation(
+            "Sending tracked cart to Kroger with {ItemCount} items. dryRun={DryRun}, allowUnknownStock={AllowUnknownStock}",
+            trackedItems.Count,
+            dryRun,
+            allowUnknownStock);
+
+        var results = new List<object>();
+        var successCount = 0;
+
+        foreach (var item in trackedItems)
+        {
+            var result = await AddToCartAsync(
+                store,
+                item.Upc,
+                item.Quantity,
+                dryRun,
+                allowUnknownStock,
+                trackLocally: false);
+
+            results.Add(result);
+
+            if (result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true)
+            {
+                successCount++;
+            }
+        }
+
+        return new
+        {
+            ok = true,
+            dry_run = dryRun,
+            count = trackedItems.Count,
+            successful = successCount,
+            results
+        };
+    }
+
     private static string SummarizeBody(string? body)
     {
         if (string.IsNullOrWhiteSpace(body))
@@ -421,6 +611,16 @@ internal sealed class KrogerCartService
 
         const int maxLength = 400;
         return body.Length <= maxLength ? body : $"{body[..maxLength]}...";
+    }
+
+    private static string? BuildProductUrl(KrogerProductSnapshot? snapshot)
+    {
+        if (snapshot is null || string.IsNullOrWhiteSpace(snapshot.ProductPageUri))
+        {
+            return null;
+        }
+
+        return $"{KrogerWebBaseUrl}{snapshot.ProductPageUri}";
     }
 
     private static bool? IsInStock(string? stockLevel)

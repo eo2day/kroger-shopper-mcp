@@ -26,7 +26,11 @@ internal static class ServiceHost
         builder.Services.AddSingleton(config);
         builder.Services.AddSingleton(new KrogerStore(config.DbPath));
         builder.Services.AddHttpClient();
-        builder.Services.AddSingleton<KrogerOAuthClient>();
+        builder.Services.AddSingleton(sp =>
+            new KrogerOAuthClient(
+                config,
+                defaultScopes,
+                sp.GetRequiredService<ILogger<KrogerOAuthClient>>()));
         builder.Services.AddSingleton<KrogerProductsClient>();
         builder.Services.AddSingleton<KrogerLocationsClient>();
         builder.Services.AddSingleton<KrogerCartService>();
