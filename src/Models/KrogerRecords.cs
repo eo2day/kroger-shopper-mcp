@@ -16,12 +16,6 @@ internal sealed record StoredToken(
     string TokenType,
     DateTimeOffset ExpiresAtUtc);
 
-internal sealed record TrackedCartItem(
-    string Upc,
-    int Quantity,
-    DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
-
 internal sealed record StagedCartItem(
     string Upc,
     int Quantity,
@@ -32,11 +26,13 @@ internal sealed record TrackedCartRemovalResult(
     int Removed,
     int RemainingQuantity);
 
-internal sealed record PurchasedItem(
+internal sealed record KrogerSendHistoryItem(
     long Id,
+    string BatchId,
+    string Source,
     string Upc,
     int Quantity,
-    DateTimeOffset PurchasedAtUtc);
+    DateTimeOffset SentAtUtc);
 
 internal sealed record WebCredential(
     string Username,

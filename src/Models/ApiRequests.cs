@@ -70,14 +70,6 @@ internal sealed class KrogerMarkPurchasedRequest
     public string? PurchasedAtUtc { get; init; }
 }
 
-internal sealed class KrogerClearTrackedCartRequest
-{
-    public bool? MarkPurchased { get; init; }
-    public string? PurchasedAtUtc { get; init; }
-
-    public bool IsMarkPurchased => MarkPurchased == true;
-}
-
 internal sealed class KrogerSaveCartRequest
 {
     public string? Name { get; init; }

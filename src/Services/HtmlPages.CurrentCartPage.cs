@@ -221,7 +221,7 @@ internal static partial class HtmlPages
             <div class="topbar">
               <div>
                 <p class="eyebrow">Kroger Assistant</p>
-                <h1>Current Cart</h1>
+                <h1>Working Cart</h1>
                 <p class="meta">Signed in as <strong>{{username}}</strong></p>
               </div>
               <div class="actions">
@@ -233,8 +233,8 @@ internal static partial class HtmlPages
             <div class="content">
               <div id="summary" class="summary">
                 <div>
-                  <h2>Tracked Cart</h2>
-                  <p class="meta">This is the local tracked view of items added through the assistant.</p>
+                  <h2>Working Cart</h2>
+                  <p class="meta">This is the local staged cart. Review it here, then send the whole batch to Kroger when ready.</p>
                 </div>
                 <div class="summary-metrics">
                   <span class="pill">Loading...</span>
@@ -266,7 +266,7 @@ internal static partial class HtmlPages
               <details class="expander">
                 <summary>Save As Saved Cart</summary>
                 <div class="expander-body">
-                  <p class="meta">Save the current tracked cart as a named saved cart.</p>
+                  <p class="meta">Save the current working cart as a named saved cart.</p>
                   <div class="add-form-row">
                     <input id="save-cart-name" class="text-input" type="text" placeholder="Saved cart name">
                     <button id="save-cart-button" class="button" type="button">Save Current Cart</button>
@@ -275,7 +275,7 @@ internal static partial class HtmlPages
               </details>
 
               <div id="item-grid" class="item-grid">
-                <div class="loading">Loading current cart...</div>
+                <div class="loading">Loading working cart...</div>
               </div>
             </div>
           </div>
@@ -420,8 +420,8 @@ internal static partial class HtmlPages
 
               summary.innerHTML = `
                 <div>
-                  <h2>Tracked Cart</h2>
-                  <p class="meta">This is the local tracked view of items added through the assistant.</p>
+                  <h2>Working Cart</h2>
+                  <p class="meta">This is the local staged cart. Review it here, then send the whole batch to Kroger when ready.</p>
                 </div>
                 <div class="summary-metrics">
                   <span class="pill">${currentCart.count} items</span>
@@ -435,8 +435,8 @@ internal static partial class HtmlPages
               if (!currentCart || !Array.isArray(currentCart.items) || !currentCart.items.length) {
                 itemGrid.innerHTML = `
                   <div class="empty-state">
-                    <h3>Current cart is empty</h3>
-                    <p class="empty-copy">Add items through the assistant first, then this page can manage them.</p>
+                    <h3>Working cart is empty</h3>
+                    <p class="empty-copy">Add items here or load a saved cart first, then send the whole batch to Kroger.</p>
                   </div>
                 `;
                 return;
@@ -608,7 +608,7 @@ internal static partial class HtmlPages
                 return;
               }
 
-              setStatus("Adding item...");
+              setStatus("Adding item to working cart...");
               const response = await fetch("/api/current-cart-add-item", {
                 method: "POST",
                 credentials: "same-origin",
@@ -623,22 +623,20 @@ internal static partial class HtmlPages
 
               addItemIdentifierInput.value = "";
               addItemQuantityInput.value = "1";
-              setStatus(payload.blocked ? "Item could not be added." : "Item added.");
+              setStatus(payload.blocked ? "Item could not be added." : "Item added to working cart.");
               await loadCurrentCart(true);
             }
 
             async function clearCurrentCart() {
               if (!currentCart || !Array.isArray(currentCart.items) || currentCart.items.length === 0) {
-                setStatus("Current cart is already empty.");
+                setStatus("Working cart is already empty.");
                 return;
               }
 
-              setStatus("Clearing current cart...");
-              const response = await fetch("/api/clear-tracked-cart", {
+              setStatus("Clearing working cart...");
+              const response = await fetch("/api/clear-staged-cart", {
                 method: "POST",
-                credentials: "same-origin",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ isMarkPurchased: false })
+                credentials: "same-origin"
               });
 
               const payload = await handleApiResponse(response);
@@ -659,18 +657,18 @@ internal static partial class HtmlPages
                 total_price: null
               };
 
-              setStatus("Current cart cleared.");
+              setStatus("Working cart cleared.");
               renderSummary();
               renderItems();
             }
 
             async function sendCurrentCartToKroger() {
               if (!currentCart || !Array.isArray(currentCart.items) || currentCart.items.length === 0) {
-                setStatus("Current cart is empty.");
+                setStatus("Working cart is empty.");
                 return;
               }
 
-              setStatus("Sending tracked cart to Kroger...");
+              setStatus("Sending working cart to Kroger...");
               const response = await fetch("/api/send-tracked-cart", {
                 method: "POST",
                 credentials: "same-origin"
@@ -683,7 +681,25 @@ internal static partial class HtmlPages
 
               const successful = Number(payload.successful ?? 0);
               const count = Number(payload.count ?? 0);
-              setStatus(`Sent ${successful} of ${count} tracked cart items to Kroger.`);
+              if (successful === count) {
+                updateCurrentCartCache((cached) => {
+                  cached.items = [];
+                  recalculateCurrentCartTotals(cached);
+                  return cached;
+                });
+
+                currentCart = readCache(CURRENT_CART_CACHE_KEY) ?? {
+                  items: [],
+                  count: 0,
+                  total_quantity: 0,
+                  total_price: null
+                };
+
+                renderSummary();
+                renderItems();
+              }
+
+              setStatus(`Sent ${successful} of ${count} working cart items to Kroger.${payload.batch_id ? ` Batch ${payload.batch_id}.` : ""}`);
             }
 
             async function saveCurrentCart() {
@@ -693,7 +709,7 @@ internal static partial class HtmlPages
                 return;
               }
 
-              setStatus("Saving current cart...");
+              setStatus("Saving working cart...");
               const response = await fetch("/api/save-cart", {
                 method: "POST",
                 credentials: "same-origin",
@@ -706,7 +722,7 @@ internal static partial class HtmlPages
                 return;
               }
 
-              setStatus("Current cart saved.");
+              setStatus("Working cart saved.");
             }
 
             addItemButton.addEventListener("click", () => {
@@ -725,7 +741,7 @@ internal static partial class HtmlPages
             loadCurrentCart().catch((error) => {
               itemGrid.innerHTML = `
                 <div class="empty-state">
-                  <h3>Couldn’t Load Current Cart</h3>
+                  <h3>Couldn’t Load Working Cart</h3>
                   <p class="empty-copy">${escapeHtml(error.message)}</p>
                 </div>
               `;

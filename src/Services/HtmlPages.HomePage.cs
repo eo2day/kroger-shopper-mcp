@@ -57,6 +57,7 @@ internal static partial class HtmlPages
               <div class="actions">
                 <a class="ghost-link" href="/saved-carts">Saved Carts</a>
                 <a class="ghost-link" href="/current-cart">Current Cart</a>
+                <a class="ghost-link" href="/sent-history">Sent History</a>
               </div>
             </div>
             <div class="content">
@@ -71,6 +72,7 @@ internal static partial class HtmlPages
                   <div class="inline-actions">
                     <a class="button" href="/saved-carts">Browse Saved Carts</a>
                     <a class="button" href="/current-cart">View Current Cart</a>
+                    <a class="button" href="/sent-history">Sent History</a>
                   </div>
                   <div class="inline-actions">
                     <a class="ghost-link" href="/change-password">Change Password</a>

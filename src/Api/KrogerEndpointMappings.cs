@@ -191,6 +191,19 @@ internal static class KrogerEndpointMappings
                 "text/html; charset=utf-8");
         });
 
+        app.MapGet("/sent-history", async (HttpContext http, KrogerStore store) =>
+        {
+            var authResult = await RequireWebUiAuthAsync(http, store);
+            if (authResult.Result is not null)
+            {
+                return authResult.Result;
+            }
+
+            return HtmlContentNoCache(
+                HtmlPages.RenderSentHistoryPage(authResult.Username!),
+                "text/html; charset=utf-8");
+        });
+
         app.MapGet("/authorize", async (HttpContext http, KrogerOAuthClient oauthClient, KrogerStore store, ILoggerFactory loggerFactory) =>
         {
             var logger = loggerFactory.CreateLogger("KrogerOAuthFlow");
@@ -437,93 +450,24 @@ internal static class KrogerEndpointMappings
                 return Results.BadRequest(new { ok = false, error = "missing upc" });
             }
 
-            var result = await store.RemoveTrackedCartItemAsync(request.Upc.Trim(), request.Quantity);
+            var result = await store.RemoveStagedCartItemAsync(request.Upc.Trim(), request.Quantity);
             return Results.Json(new
             {
                 ok = true,
-                scope = "tracked_cart_only",
+                scope = "working_cart",
                 upc = request.Upc.Trim(),
                 removed = result.Removed,
                 remaining_quantity = result.RemainingQuantity
             });
         });
 
-        app.MapPost("/api/mark-purchased", async (KrogerMarkPurchasedRequest request, KrogerStore store) =>
-        {
-            if (string.IsNullOrWhiteSpace(request.Upc))
-            {
-                return Results.BadRequest(new { ok = false, error = "missing upc" });
-            }
-
-            DateTimeOffset? purchasedAtUtc = null;
-            if (!string.IsNullOrWhiteSpace(request.PurchasedAtUtc))
-            {
-                if (!DateTimeOffset.TryParse(request.PurchasedAtUtc, out var parsed))
-                {
-                    return Results.BadRequest(new { ok = false, error = "invalid purchasedAtUtc" });
-                }
-
-                purchasedAtUtc = parsed;
-            }
-
-            var purchased = await store.MarkTrackedCartItemPurchasedAsync(request.Upc.Trim(), request.Quantity, purchasedAtUtc);
-            if (purchased is null)
-            {
-                return Results.NotFound(new { ok = false, error = "tracked_cart_item_not_found", upc = request.Upc.Trim() });
-            }
-
-            return Results.Json(new
-            {
-                ok = true,
-                id = purchased.Id,
-                upc = purchased.Upc,
-                quantity = purchased.Quantity,
-                purchased_at_utc = purchased.PurchasedAtUtc.ToString("O")
-            });
-        });
-
-        app.MapPost("/api/clear-tracked-cart", async (KrogerClearTrackedCartRequest request, KrogerStore store) =>
-        {
-            DateTimeOffset? purchasedAtUtc = null;
-            if (!string.IsNullOrWhiteSpace(request.PurchasedAtUtc))
-            {
-                if (!DateTimeOffset.TryParse(request.PurchasedAtUtc, out var parsed))
-                {
-                    return Results.BadRequest(new { ok = false, error = "invalid purchasedAtUtc" });
-                }
-
-                purchasedAtUtc = parsed;
-            }
-
-            if (request.IsMarkPurchased)
-            {
-                var purchasedItems = await store.MarkAllTrackedCartItemsPurchasedAsync(purchasedAtUtc);
-                return Results.Json(new
-                {
-                    ok = true,
-                    action = "mark_purchased_and_clear",
-                    count = purchasedItems.Count,
-                    items = purchasedItems.Select(item => new
-                    {
-                        id = item.Id,
-                        upc = item.Upc,
-                        quantity = item.Quantity,
-                        purchased_at_utc = item.PurchasedAtUtc.ToString("O")
-                    })
-                });
-            }
-
-            var removedCount = await store.ClearTrackedCartAsync();
-            return Results.Json(new { ok = true, action = "clear_tracked_cart", removed = removedCount });
-        });
-
-        app.MapGet("/api/purchased-items", async (HttpContext http, KrogerStore store) =>
+        app.MapGet("/api/sent-to-kroger-history", async (HttpContext http, KrogerStore store) =>
         {
             var limitRaw = http.Request.Query["limit"].ToString();
             var limit = int.TryParse(limitRaw, out var parsedLimit)
                 ? Math.Clamp(parsedLimit, 1, 500)
                 : 100;
-            var items = await store.GetPurchasedItemsAsync(limit);
+            var items = await store.GetKrogerSendHistoryAsync(limit);
             return Results.Json(new
             {
                 ok = true,
@@ -531,9 +475,11 @@ internal static class KrogerEndpointMappings
                 items = items.Select(item => new
                 {
                     id = item.Id,
+                    batch_id = item.BatchId,
+                    source = item.Source,
                     upc = item.Upc,
                     quantity = item.Quantity,
-                    purchased_at_utc = item.PurchasedAtUtc.ToString("O")
+                    sent_at_utc = item.SentAtUtc.ToString("O")
                 })
             });
         });
@@ -545,7 +491,7 @@ internal static class KrogerEndpointMappings
                 return Results.BadRequest(new { ok = false, error = "missing name" });
             }
 
-            var savedCart = await store.SaveTrackedCartAsync(request.Name.Trim());
+            var savedCart = await store.SaveStagedCartAsync(request.Name.Trim());
             var items = JsonSerializer.Deserialize<object>(savedCart.ItemsJson);
             return Results.Json(new
             {
@@ -849,12 +795,7 @@ internal static class KrogerEndpointMappings
             }
 
             var quantity = request.Quantity <= 0 ? 1 : request.Quantity;
-            return Results.Json(await cartService.AddToCartAsync(
-                store,
-                upc,
-                quantity,
-                dryRun: false,
-                allowUnknownStock: true));
+            return Results.Json(await cartService.AddToStagedCartAsync(store, upc, quantity));
         });
 
         app.MapPost("/api/current-cart-set-quantity", async (HttpContext http, KrogerSetTrackedCartItemQuantityRequest request, KrogerStore store) =>
@@ -876,7 +817,7 @@ internal static class KrogerEndpointMappings
             }
 
             var upc = request.Upc.Trim();
-            var quantity = await store.SetTrackedCartItemQuantityAsync(upc, request.Quantity);
+            var quantity = await store.SetStagedCartItemQuantityAsync(upc, request.Quantity);
             return Results.Json(new
             {
                 ok = true,
@@ -900,7 +841,7 @@ internal static class KrogerEndpointMappings
             }
 
             var upc = request.Upc.Trim();
-            var result = await store.RemoveTrackedCartItemAsync(upc, null);
+            var result = await store.RemoveStagedCartItemAsync(upc, null);
             return Results.Json(new
             {
                 ok = true,
@@ -918,10 +859,11 @@ internal static class KrogerEndpointMappings
                 return authResult.Result;
             }
 
-            return Results.Json(await cartService.CommitTrackedCartAsync(
+            return Results.Json(await cartService.SendWorkingCartAsync(
                 store,
                 dryRun: false,
-                allowUnknownStock: true));
+                allowUnknownStock: true,
+                clearOnSuccess: true));
         });
 
         app.MapPost("/api/apply-saved-cart", async (KrogerApplySavedCartRequest request, KrogerStore store, KrogerCartService cartService) =>
@@ -1119,11 +1061,11 @@ internal static class KrogerEndpointMappings
                             return Results.BadRequest(new { ok = false, error = "missing upc" });
                         }
 
-                        var result = await store.RemoveTrackedCartItemAsync(request.Upc.Trim(), request.Quantity);
+                        var result = await store.RemoveStagedCartItemAsync(request.Upc.Trim(), request.Quantity);
                         return Results.Json(new
                         {
                             ok = true,
-                            scope = "tracked_cart_only",
+                            scope = "working_cart",
                             upc = request.Upc.Trim(),
                             removed = result.Removed,
                             remaining_quantity = result.RemainingQuantity
@@ -1131,36 +1073,19 @@ internal static class KrogerEndpointMappings
                     }
                 case "mark-purchased":
                     {
-                        if (string.IsNullOrWhiteSpace(request.Upc))
-                        {
-                            return Results.BadRequest(new { ok = false, error = "missing upc" });
-                        }
-
-                        var purchased = await store.MarkTrackedCartItemPurchasedAsync(request.Upc.Trim(), request.Quantity, null);
-                        if (purchased is null)
-                        {
-                            return Results.NotFound(new { ok = false, error = "tracked_cart_item_not_found", upc = request.Upc.Trim() });
-                        }
-
-                        return Results.Json(new
-                        {
-                            ok = true,
-                            id = purchased.Id,
-                            upc = purchased.Upc,
-                            quantity = purchased.Quantity,
-                            purchased_at_utc = purchased.PurchasedAtUtc.ToString("O")
-                        });
+                        return Results.BadRequest(new { ok = false, error = "purchased_items_removed_use_sent_to_kroger_history" });
                     }
                 case "clear-tracked-cart":
                     {
-                        var removedCount = await store.ClearTrackedCartAsync();
-                        return Results.Json(new { ok = true, action = "clear_tracked_cart", removed = removedCount });
+                        var removedCount = await store.ClearStagedCartAsync();
+                        return Results.Json(new { ok = true, action = "clear_working_cart", removed = removedCount });
                     }
                 case "send-current-cart":
                     {
-                        return Results.Json(await cartService.CommitTrackedCartAsync(
+                        return Results.Json(await cartService.SendWorkingCartAsync(
                             store,
                             request.IsDryRun,
+                            true,
                             true));
                     }
                 case "save-cart":
@@ -1170,7 +1095,7 @@ internal static class KrogerEndpointMappings
                             return Results.BadRequest(new { ok = false, error = "missing label" });
                         }
 
-                        var savedCart = await store.SaveTrackedCartAsync(request.Label.Trim());
+                        var savedCart = await store.SaveStagedCartAsync(request.Label.Trim());
                         return Results.Json(new
                         {
                             ok = true,
@@ -1420,7 +1345,7 @@ internal static class KrogerEndpointMappings
                     }
                 case "purchased-items":
                     {
-                        var items = await store.GetPurchasedItemsAsync(request.Limit ?? 100);
+                        var items = await store.GetKrogerSendHistoryAsync(request.Limit ?? 100);
                         return Results.Json(new
                         {
                             ok = true,
@@ -1428,9 +1353,11 @@ internal static class KrogerEndpointMappings
                             items = items.Select(item => new
                             {
                                 id = item.Id,
+                                batch_id = item.BatchId,
+                                source = item.Source,
                                 upc = item.Upc,
                                 quantity = item.Quantity,
-                                purchased_at_utc = item.PurchasedAtUtc.ToString("O")
+                                sent_at_utc = item.SentAtUtc.ToString("O")
                             })
                         });
                     }

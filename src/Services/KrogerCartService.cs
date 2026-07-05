@@ -11,6 +11,7 @@ namespace KrogerShopperMcp.Services;
 internal sealed class KrogerCartService
 {
     private sealed record SavedCartItemPayload(string? Upc, int Quantity);
+    private sealed record SendAttemptResult(string Upc, int Quantity, bool Ok);
     private const string KrogerWebBaseUrl = "https://www.kroger.com";
     private static readonly JsonSerializerOptions SavedCartJsonOptions = new()
     {
@@ -33,45 +34,7 @@ internal sealed class KrogerCartService
 
     public async Task<object> GetCartInfoAsync(KrogerStore store, string? locationId)
     {
-        var trackedItems = await store.GetTrackedCartItemsAsync();
-        var resolvedLocationId = string.IsNullOrWhiteSpace(locationId)
-            ? await store.GetDefaultStoreIdAsync()
-            : locationId;
-
-        var items = new List<object>();
-        foreach (var trackedItem in trackedItems)
-        {
-            var snapshot = await _productsClient.GetProductByUpcAsync(store, trackedItem.Upc, resolvedLocationId);
-            items.Add(new
-            {
-                upc = trackedItem.Upc,
-                tracked_quantity = trackedItem.Quantity,
-                updated_at_utc = trackedItem.UpdatedAtUtc.ToString("O"),
-                product_id = snapshot?.ProductId,
-                description = snapshot?.Description,
-                brand = snapshot?.Brand,
-                size = snapshot?.Size,
-                regular_price = snapshot?.RegularPrice,
-                promo_price = snapshot?.PromoPrice,
-                stock_level = snapshot?.StockLevel,
-                in_stock = IsInStock(snapshot?.StockLevel),
-                fulfillment = new
-                {
-                    curbside = snapshot?.Curbside,
-                    delivery = snapshot?.Delivery,
-                    in_store = snapshot?.InStore,
-                    ship_to_home = snapshot?.ShipToHome
-                }
-            });
-        }
-
-        return new
-        {
-            ok = true,
-            location_id = resolvedLocationId,
-            count = items.Count,
-            items
-        };
+        return await GetStagedCartInfoAsync(store, locationId);
     }
 
     public async Task<object> GetStagedCartInfoAsync(KrogerStore store, string? locationId)
@@ -299,7 +262,7 @@ internal sealed class KrogerCartService
 
         if (trackLocally)
         {
-            await store.AddTrackedCartItemAsync(upc, quantity);
+            await store.AddStagedCartItemAsync(upc, quantity);
         }
 
         _logger.LogInformation(
@@ -343,6 +306,7 @@ internal sealed class KrogerCartService
         _logger.LogInformation("Applying saved cart {Name} with {ItemCount} items. dryRun={DryRun}, allowUnknownStock={AllowUnknownStock}", name, items.Count, dryRun, allowUnknownStock);
         var results = new List<object>();
         var successCount = 0;
+        var successfulItems = new List<(string Upc, int Quantity)>();
 
         foreach (var item in items)
         {
@@ -362,10 +326,17 @@ internal sealed class KrogerCartService
             var result = await AddToCartAsync(store, item.Upc.Trim(), item.Quantity, dryRun, allowUnknownStock);
             results.Add(result);
 
-            if (result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true)
+            if (IsSuccessful(result))
             {
                 successCount++;
+                successfulItems.Add((item.Upc.Trim(), item.Quantity));
             }
+        }
+
+        string? batchId = null;
+        if (!dryRun && successfulItems.Count > 0)
+        {
+            batchId = await store.RecordKrogerSendBatchAsync($"saved_cart:{savedCart.Name}", successfulItems);
         }
 
         return new
@@ -375,6 +346,7 @@ internal sealed class KrogerCartService
             dry_run = dryRun,
             count = items.Count,
             successful = successCount,
+            batch_id = batchId,
             results
         };
     }
@@ -462,23 +434,23 @@ internal sealed class KrogerCartService
 
     public async Task<object> GetCurrentCartBrowserDataAsync(KrogerStore store, string? locationId)
     {
-        var trackedItems = await store.GetTrackedCartItemsAsync();
+        var stagedItems = await store.GetStagedCartItemsAsync();
         var resolvedLocationId = string.IsNullOrWhiteSpace(locationId)
             ? await store.GetDefaultStoreIdAsync()
             : locationId;
         var snapshotsByUpc = await _productsClient.GetProductsByUpcsAsync(
             store,
-            trackedItems.Select(static item => item.Upc),
+            stagedItems.Select(static item => item.Upc),
             resolvedLocationId);
 
         var itemViews = new List<object>();
         decimal? totalPrice = 0m;
 
-        foreach (var trackedItem in trackedItems)
+        foreach (var stagedItem in stagedItems)
         {
-            snapshotsByUpc.TryGetValue(trackedItem.Upc, out var snapshot);
+            snapshotsByUpc.TryGetValue(stagedItem.Upc, out var snapshot);
             var unitPrice = snapshot?.PromoPrice ?? snapshot?.RegularPrice;
-            var lineTotal = unitPrice is decimal price ? price * trackedItem.Quantity : (decimal?)null;
+            var lineTotal = unitPrice is decimal price ? price * stagedItem.Quantity : (decimal?)null;
             if (lineTotal is not null)
             {
                 totalPrice += lineTotal.Value;
@@ -486,9 +458,9 @@ internal sealed class KrogerCartService
 
             itemViews.Add(new
             {
-                upc = trackedItem.Upc,
-                quantity = trackedItem.Quantity,
-                updated_at_utc = trackedItem.UpdatedAtUtc.ToString("O"),
+                upc = stagedItem.Upc,
+                quantity = stagedItem.Quantity,
+                updated_at_utc = stagedItem.UpdatedAtUtc.ToString("O"),
                 product_id = snapshot?.ProductId,
                 description = snapshot?.Description,
                 brand = snapshot?.Brand,
@@ -509,7 +481,7 @@ internal sealed class KrogerCartService
             ok = true,
             location_id = resolvedLocationId,
             count = itemViews.Count,
-            total_quantity = trackedItems.Sum(item => item.Quantity),
+            total_quantity = stagedItems.Sum(item => item.Quantity),
             total_price = itemViews.Count == 0 ? null : totalPrice,
             items = itemViews
         };
@@ -530,16 +502,24 @@ internal sealed class KrogerCartService
             clearOnSuccess);
         var results = new List<object>();
         var successCount = 0;
+        var successfulItems = new List<(string Upc, int Quantity)>();
 
         foreach (var item in stagedItems)
         {
             var result = await AddToCartAsync(store, item.Upc, item.Quantity, dryRun, allowUnknownStock);
             results.Add(result);
 
-            if (result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true)
+            if (IsSuccessful(result))
             {
                 successCount++;
+                successfulItems.Add((item.Upc, item.Quantity));
             }
+        }
+
+        string? batchId = null;
+        if (!dryRun && successfulItems.Count > 0)
+        {
+            batchId = await store.RecordKrogerSendBatchAsync("staged_cart", successfulItems);
         }
 
         if (!dryRun && clearOnSuccess && successCount == stagedItems.Count)
@@ -554,52 +534,24 @@ internal sealed class KrogerCartService
             dry_run = dryRun,
             count = stagedItems.Count,
             successful = successCount,
+            batch_id = batchId,
             cleared_staged_cart = !dryRun && clearOnSuccess && successCount == stagedItems.Count,
             results
         };
     }
 
-    public async Task<object> CommitTrackedCartAsync(
+    public async Task<object> SendWorkingCartAsync(
         KrogerStore store,
         bool dryRun,
-        bool allowUnknownStock)
+        bool allowUnknownStock,
+        bool clearOnSuccess)
     {
-        var trackedItems = await store.GetTrackedCartItemsAsync();
-        _logger.LogInformation(
-            "Sending tracked cart to Kroger with {ItemCount} items. dryRun={DryRun}, allowUnknownStock={AllowUnknownStock}",
-            trackedItems.Count,
-            dryRun,
-            allowUnknownStock);
+        return await CommitStagedCartAsync(store, dryRun, allowUnknownStock, clearOnSuccess);
+    }
 
-        var results = new List<object>();
-        var successCount = 0;
-
-        foreach (var item in trackedItems)
-        {
-            var result = await AddToCartAsync(
-                store,
-                item.Upc,
-                item.Quantity,
-                dryRun,
-                allowUnknownStock,
-                trackLocally: false);
-
-            results.Add(result);
-
-            if (result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true)
-            {
-                successCount++;
-            }
-        }
-
-        return new
-        {
-            ok = true,
-            dry_run = dryRun,
-            count = trackedItems.Count,
-            successful = successCount,
-            results
-        };
+    private static bool IsSuccessful(object result)
+    {
+        return result.GetType().GetProperty("ok")?.GetValue(result) as bool? == true;
     }
 
     private static string SummarizeBody(string? body)

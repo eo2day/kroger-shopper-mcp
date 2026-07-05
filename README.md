@@ -1,6 +1,6 @@
 # kroger-shopper-mcp
 
-`kroger-shopper-mcp` is a local C# service for Kroger shopper automation. It handles OAuth, store-aware product search, cart add flows, and local cart tracking for higher-level agent or MCP-style integrations.
+`kroger-shopper-mcp` is a local C# service for Kroger shopper automation. It handles OAuth, store-aware product search, saved carts, and working-cart send flows for higher-level agent or MCP-style integrations.
 
 > [!NOTE]
 > This project was developed in collaboration with a personal agentic AI workflow to accelerate local automation, rapid iteration, and hands-on integration work.
@@ -12,14 +12,14 @@ The service is designed to sit between a Kroger shopper account and local automa
 - generating shopper authorization URLs
 - exchanging and refreshing Kroger OAuth tokens
 - searching products by store
-- tracking a local cart view
+- managing a single local working cart before send
 - adding items to a Kroger cart with stock-aware safety checks
 
 ## Features
 
 - OAuth authorization code flow for Kroger shopper accounts
 - app-managed login gate for the authorize page with first-run credential setup (`/setup` creates the initial username/password, subsequent access uses `/login`)
-- local SQLite storage for token metadata, pending OAuth state, settings, and tracked cart items
+- local SQLite storage for token metadata, pending OAuth state, settings, working-cart items, saved carts, and send history
 - store search and default-store selection
 - product search scoped to a Kroger location
 - cart add support with:
@@ -32,7 +32,7 @@ The service is designed to sit between a Kroger shopper account and local automa
   3. Commit to live Kroger when ready
   4. Optionally clear staged cart after commit
 - named saved carts backed by SQLite for quick reuse
-- purchased-item history with quantities and timestamps
+- send-to-Kroger history with batch IDs, source labels, quantities, and timestamps
 
 ## Configuration
 
@@ -130,9 +130,7 @@ Common local endpoints:
 - `POST /api/remove-staged-cart-item`
 - `POST /api/clear-staged-cart`
 - `POST /api/remove-tracked-cart-item`
-- `POST /api/mark-purchased`
-- `POST /api/clear-tracked-cart`
-- `GET /api/purchased-items`
+- `GET /api/sent-to-kroger-history`
 - `POST /api/save-cart`
 - `POST /api/save-staged-cart`
 - `GET /api/saved-carts`

@@ -41,13 +41,6 @@ internal sealed class KrogerStore
               updated_at_utc text not null
             );
 
-            create table if not exists tracked_cart_items (
-              upc text primary key,
-              quantity integer not null,
-              created_at_utc text not null,
-              updated_at_utc text not null
-            );
-
             create table if not exists staged_cart_items (
               upc text primary key,
               quantity integer not null,
@@ -55,11 +48,13 @@ internal sealed class KrogerStore
               updated_at_utc text not null
             );
 
-            create table if not exists purchased_items (
+            create table if not exists kroger_send_history (
               id integer primary key autoincrement,
+              batch_id text not null,
+              source text not null,
               upc text not null,
               quantity integer not null,
-              purchased_at_utc text not null
+              sent_at_utc text not null
             );
 
             create table if not exists saved_carts (
@@ -87,8 +82,9 @@ internal sealed class KrogerStore
             """;
         await cmd.ExecuteNonQueryAsync();
 
-        await EnsureCreatedAtColumnAsync(db, "tracked_cart_items");
         await EnsureCreatedAtColumnAsync(db, "staged_cart_items");
+        await MigrateTrackedCartIntoStagedAsync(db);
+        await DropLegacyCartTablesAsync(db);
     }
 
     public async Task SavePendingStateAsync(string state, IReadOnlyList<string> scopes)
@@ -253,33 +249,14 @@ internal sealed class KrogerStore
         await labelCmd.ExecuteNonQueryAsync();
     }
 
-    public async Task AddTrackedCartItemAsync(string upc, int quantity)
-    {
-        await using var db = await OpenDbAsync();
-        var now = DateTimeOffset.UtcNow.ToString("O");
-        var cmd = db.CreateCommand();
-        cmd.CommandText = """
-            insert into tracked_cart_items (upc, quantity, created_at_utc, updated_at_utc)
-            values ($upc, $quantity, $created, $updated)
-            on conflict(upc) do update set
-              quantity = tracked_cart_items.quantity + excluded.quantity,
-              updated_at_utc = excluded.updated_at_utc
-            """;
-        cmd.Parameters.AddWithValue("$upc", upc);
-        cmd.Parameters.AddWithValue("$quantity", quantity);
-        cmd.Parameters.AddWithValue("$created", now);
-        cmd.Parameters.AddWithValue("$updated", now);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    public async Task<int> SetTrackedCartItemQuantityAsync(string upc, int quantity)
+    public async Task<int> SetStagedCartItemQuantityAsync(string upc, int quantity)
     {
         await using var db = await OpenDbAsync();
 
         if (quantity <= 0)
         {
             var deleteCmd = db.CreateCommand();
-            deleteCmd.CommandText = "delete from tracked_cart_items where upc = $upc";
+            deleteCmd.CommandText = "delete from staged_cart_items where upc = $upc";
             deleteCmd.Parameters.AddWithValue("$upc", upc);
             await deleteCmd.ExecuteNonQueryAsync();
             return 0;
@@ -287,7 +264,7 @@ internal sealed class KrogerStore
 
         var cmd = db.CreateCommand();
         cmd.CommandText = """
-            insert into tracked_cart_items (upc, quantity, created_at_utc, updated_at_utc)
+            insert into staged_cart_items (upc, quantity, created_at_utc, updated_at_utc)
             values ($upc, $quantity, $created, $updated)
             on conflict(upc) do update set
               quantity = excluded.quantity,
@@ -321,30 +298,6 @@ internal sealed class KrogerStore
         await cmd.ExecuteNonQueryAsync();
     }
 
-    public async Task<IReadOnlyList<TrackedCartItem>> GetTrackedCartItemsAsync()
-    {
-        await using var db = await OpenDbAsync();
-        var cmd = db.CreateCommand();
-        cmd.CommandText = """
-            select upc, quantity, created_at_utc, updated_at_utc
-            from tracked_cart_items
-            order by created_at_utc asc, upc asc
-            """;
-
-        var items = new List<TrackedCartItem>();
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            items.Add(new TrackedCartItem(
-                reader.GetString(0),
-                reader.GetInt32(1),
-                DateTimeOffset.Parse(reader.GetString(2)),
-                DateTimeOffset.Parse(reader.GetString(3))));
-        }
-
-        return items;
-    }
-
     public async Task<IReadOnlyList<StagedCartItem>> GetStagedCartItemsAsync()
     {
         await using var db = await OpenDbAsync();
@@ -367,54 +320,6 @@ internal sealed class KrogerStore
         }
 
         return items;
-    }
-
-    public async Task<TrackedCartRemovalResult> RemoveTrackedCartItemAsync(string upc, int? quantity)
-    {
-        await using var db = await OpenDbAsync();
-
-        var getCmd = db.CreateCommand();
-        getCmd.CommandText = """
-            select quantity
-            from tracked_cart_items
-            where upc = $upc
-            limit 1
-            """;
-        getCmd.Parameters.AddWithValue("$upc", upc);
-        var currentObj = await getCmd.ExecuteScalarAsync();
-        var currentQuantity = currentObj is long currentLong ? (int)currentLong : 0;
-
-        if (currentQuantity <= 0)
-        {
-            return new TrackedCartRemovalResult(0, 0);
-        }
-
-        var removeQuantity = quantity is > 0 ? quantity.Value : currentQuantity;
-        var remainingQuantity = Math.Max(0, currentQuantity - removeQuantity);
-
-        if (remainingQuantity == 0)
-        {
-            var deleteCmd = db.CreateCommand();
-            deleteCmd.CommandText = "delete from tracked_cart_items where upc = $upc";
-            deleteCmd.Parameters.AddWithValue("$upc", upc);
-            await deleteCmd.ExecuteNonQueryAsync();
-        }
-        else
-        {
-            var updateCmd = db.CreateCommand();
-            updateCmd.CommandText = """
-                update tracked_cart_items
-                set quantity = $quantity,
-                    updated_at_utc = $updated
-                where upc = $upc
-                """;
-            updateCmd.Parameters.AddWithValue("$upc", upc);
-            updateCmd.Parameters.AddWithValue("$quantity", remainingQuantity);
-            updateCmd.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
-            await updateCmd.ExecuteNonQueryAsync();
-        }
-
-        return new TrackedCartRemovalResult(Math.Min(removeQuantity, currentQuantity), remainingQuantity);
     }
 
     public async Task<TrackedCartRemovalResult> RemoveStagedCartItemAsync(string upc, int? quantity)
@@ -465,93 +370,6 @@ internal sealed class KrogerStore
         return new TrackedCartRemovalResult(Math.Min(removeQuantity, currentQuantity), remainingQuantity);
     }
 
-    public async Task<PurchasedItem?> MarkTrackedCartItemPurchasedAsync(string upc, int? quantity, DateTimeOffset? purchasedAtUtc = null)
-    {
-        await using var db = await OpenDbAsync();
-
-        var getCmd = db.CreateCommand();
-        getCmd.CommandText = """
-            select quantity
-            from tracked_cart_items
-            where upc = $upc
-            limit 1
-            """;
-        getCmd.Parameters.AddWithValue("$upc", upc);
-        var currentObj = await getCmd.ExecuteScalarAsync();
-        var currentQuantity = currentObj is long currentLong ? (int)currentLong : 0;
-
-        if (currentQuantity <= 0)
-        {
-            return null;
-        }
-
-        var purchasedQuantity = quantity is > 0 ? Math.Min(quantity.Value, currentQuantity) : currentQuantity;
-        var purchasedAt = purchasedAtUtc ?? DateTimeOffset.UtcNow;
-
-        var insertCmd = db.CreateCommand();
-        insertCmd.CommandText = """
-            insert into purchased_items (upc, quantity, purchased_at_utc)
-            values ($upc, $quantity, $purchasedAt)
-            returning id
-            """;
-        insertCmd.Parameters.AddWithValue("$upc", upc);
-        insertCmd.Parameters.AddWithValue("$quantity", purchasedQuantity);
-        insertCmd.Parameters.AddWithValue("$purchasedAt", purchasedAt.ToString("O"));
-        var idObj = await insertCmd.ExecuteScalarAsync();
-        var id = idObj is long longId ? longId : Convert.ToInt64(idObj);
-
-        var remainingQuantity = currentQuantity - purchasedQuantity;
-        if (remainingQuantity <= 0)
-        {
-            var deleteCmd = db.CreateCommand();
-            deleteCmd.CommandText = "delete from tracked_cart_items where upc = $upc";
-            deleteCmd.Parameters.AddWithValue("$upc", upc);
-            await deleteCmd.ExecuteNonQueryAsync();
-        }
-        else
-        {
-            var updateCmd = db.CreateCommand();
-            updateCmd.CommandText = """
-                update tracked_cart_items
-                set quantity = $quantity,
-                    updated_at_utc = $updated
-                where upc = $upc
-                """;
-            updateCmd.Parameters.AddWithValue("$upc", upc);
-            updateCmd.Parameters.AddWithValue("$quantity", remainingQuantity);
-            updateCmd.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
-            await updateCmd.ExecuteNonQueryAsync();
-        }
-
-        return new PurchasedItem(id, upc, purchasedQuantity, purchasedAt);
-    }
-
-    public async Task<IReadOnlyList<PurchasedItem>> MarkAllTrackedCartItemsPurchasedAsync(DateTimeOffset? purchasedAtUtc = null)
-    {
-        var trackedItems = await GetTrackedCartItemsAsync();
-        var purchasedAt = purchasedAtUtc ?? DateTimeOffset.UtcNow;
-        var purchasedItems = new List<PurchasedItem>();
-
-        foreach (var trackedItem in trackedItems)
-        {
-            var purchasedItem = await MarkTrackedCartItemPurchasedAsync(trackedItem.Upc, trackedItem.Quantity, purchasedAt);
-            if (purchasedItem is not null)
-            {
-                purchasedItems.Add(purchasedItem);
-            }
-        }
-
-        return purchasedItems;
-    }
-
-    public async Task<int> ClearTrackedCartAsync()
-    {
-        await using var db = await OpenDbAsync();
-        var cmd = db.CreateCommand();
-        cmd.CommandText = "delete from tracked_cart_items";
-        return await cmd.ExecuteNonQueryAsync();
-    }
-
     public async Task<int> ClearStagedCartAsync()
     {
         await using var db = await OpenDbAsync();
@@ -560,36 +378,70 @@ internal sealed class KrogerStore
         return await cmd.ExecuteNonQueryAsync();
     }
 
-    public async Task<IReadOnlyList<PurchasedItem>> GetPurchasedItemsAsync(int limit = 100)
+    public async Task<IReadOnlyList<KrogerSendHistoryItem>> GetKrogerSendHistoryAsync(int limit = 100)
     {
         await using var db = await OpenDbAsync();
         var cmd = db.CreateCommand();
         cmd.CommandText = """
-            select id, upc, quantity, purchased_at_utc
-            from purchased_items
-            order by purchased_at_utc desc, id desc
+            select id, batch_id, source, upc, quantity, sent_at_utc
+            from kroger_send_history
+            order by sent_at_utc desc, id desc
             limit $limit
             """;
         cmd.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
 
-        var items = new List<PurchasedItem>();
+        var items = new List<KrogerSendHistoryItem>();
         await using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new PurchasedItem(
+            items.Add(new KrogerSendHistoryItem(
                 reader.GetInt64(0),
                 reader.GetString(1),
-                reader.GetInt32(2),
-                DateTimeOffset.Parse(reader.GetString(3))));
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetInt32(4),
+                DateTimeOffset.Parse(reader.GetString(5))));
         }
 
         return items;
     }
 
-    public async Task<SavedCart> SaveTrackedCartAsync(string name)
+    public async Task<string> RecordKrogerSendBatchAsync(string source, IEnumerable<(string Upc, int Quantity)> items, DateTimeOffset? sentAtUtc = null)
     {
-        var trackedItems = await GetTrackedCartItemsAsync();
-        return await SaveCartItemsAsync(name, trackedItems.Select(item => (item.Upc, item.Quantity)));
+        var normalizedItems = items
+            .Where(item => !string.IsNullOrWhiteSpace(item.Upc) && item.Quantity > 0)
+            .Select(item => (item.Upc.Trim(), item.Quantity))
+            .ToList();
+
+        var batchId = Guid.NewGuid().ToString("N");
+        var sentAt = (sentAtUtc ?? DateTimeOffset.UtcNow).ToString("O");
+
+        if (normalizedItems.Count == 0)
+        {
+            return batchId;
+        }
+
+        await using var db = await OpenDbAsync();
+        await using var transaction = (SqliteTransaction)await db.BeginTransactionAsync();
+
+        foreach (var item in normalizedItems)
+        {
+            var cmd = db.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = """
+                insert into kroger_send_history (batch_id, source, upc, quantity, sent_at_utc)
+                values ($batchId, $source, $upc, $quantity, $sentAt)
+                """;
+            cmd.Parameters.AddWithValue("$batchId", batchId);
+            cmd.Parameters.AddWithValue("$source", source);
+            cmd.Parameters.AddWithValue("$upc", item.Item1);
+            cmd.Parameters.AddWithValue("$quantity", item.Item2);
+            cmd.Parameters.AddWithValue("$sentAt", sentAt);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+        return batchId;
     }
 
     public async Task<SavedCart> SaveStagedCartAsync(string name)
@@ -1069,5 +921,74 @@ internal sealed class KrogerStore
         var backfillCmd = db.CreateCommand();
         backfillCmd.CommandText = $"update {tableName} set created_at_utc = updated_at_utc where created_at_utc is null or trim(created_at_utc) = ''";
         await backfillCmd.ExecuteNonQueryAsync();
+    }
+
+    private static async Task MigrateTrackedCartIntoStagedAsync(SqliteConnection db)
+    {
+        if (!await TableExistsAsync(db, "tracked_cart_items"))
+        {
+            return;
+        }
+
+        var selectCmd = db.CreateCommand();
+        selectCmd.CommandText = """
+            select upc, quantity, created_at_utc, updated_at_utc
+            from tracked_cart_items
+            order by created_at_utc asc, upc asc
+            """;
+
+        var rows = new List<(string Upc, int Quantity, string CreatedAtUtc, string UpdatedAtUtc)>();
+        await using (var reader = await selectCmd.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                rows.Add((
+                    reader.GetString(0),
+                    reader.GetInt32(1),
+                    reader.GetString(2),
+                    reader.GetString(3)));
+            }
+        }
+
+        foreach (var row in rows)
+        {
+            var insertCmd = db.CreateCommand();
+            insertCmd.CommandText = """
+                insert into staged_cart_items (upc, quantity, created_at_utc, updated_at_utc)
+                values ($upc, $quantity, $createdAtUtc, $updatedAtUtc)
+                on conflict(upc) do update set
+                  quantity = staged_cart_items.quantity + excluded.quantity,
+                  updated_at_utc = excluded.updated_at_utc
+                """;
+            insertCmd.Parameters.AddWithValue("$upc", row.Upc);
+            insertCmd.Parameters.AddWithValue("$quantity", row.Quantity);
+            insertCmd.Parameters.AddWithValue("$createdAtUtc", row.CreatedAtUtc);
+            insertCmd.Parameters.AddWithValue("$updatedAtUtc", row.UpdatedAtUtc);
+            await insertCmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    private static async Task DropLegacyCartTablesAsync(SqliteConnection db)
+    {
+        var trackedCmd = db.CreateCommand();
+        trackedCmd.CommandText = "drop table if exists tracked_cart_items";
+        await trackedCmd.ExecuteNonQueryAsync();
+
+        var purchasedCmd = db.CreateCommand();
+        purchasedCmd.CommandText = "drop table if exists purchased_items";
+        await purchasedCmd.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<bool> TableExistsAsync(SqliteConnection db, string tableName)
+    {
+        var cmd = db.CreateCommand();
+        cmd.CommandText = """
+            select 1
+            from sqlite_master
+            where type = 'table' and name = $name
+            limit 1
+            """;
+        cmd.Parameters.AddWithValue("$name", tableName);
+        return await cmd.ExecuteScalarAsync() is not null;
     }
 }
